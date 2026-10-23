@@ -11,7 +11,7 @@
 // Looking is `Access::Read`. Making a link or changing a mode is `Access::Change`: the system lets a
 // user do it to their own files, and refuses otherwise with `Denied` naming what would be needed.
 
-use crate::core::error::{SysError, Gone};
+use crate::core::error::{SysError, Gone, Absent};
 use crate::core::privilege::{Access, Privilege};
 use crate::core::support::Support;
 use crate::core::plan::{Plan, PlanStep};
@@ -92,7 +92,7 @@ pub class Fs {
         let all : VolumeTable = FsSys::volumes(true);
         let at : i32 = all.holding(path);
         if (at < 0) {
-            throw Gone("fs.volumeOf", "a volume holding " + path);
+            throw Absent("fs.volumeOf", "volume holding " + path);
         }
         return all.at(at);
     }
@@ -103,7 +103,7 @@ pub class Fs {
     }
 
     /**
-     * What the link at `path` points to, as written in the link (possibly relative). `Gone` when `path` is
+     * What the link at `path` points to, as written in the link (possibly relative). `Invalid` when `path` is
      * not a link.
      */
     pub static fn readLink(path : string) : string ! SysError {

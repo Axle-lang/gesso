@@ -11,7 +11,7 @@
 // and for every process only from an elevated session on Linux (Windows says it to everyone). A socket
 // whose owner cannot be seen has `pid` -1; `SocketTable::unowned()` counts them.
 
-use crate::core::error::{SysError, Gone};
+use crate::core::error::{SysError, Absent};
 use crate::core::netaddr::Addr;
 use crate::core::netinfo::{SocketTable, IfaceInfo, IfaceTable, IfaceKind, RouteInfo, RouteTable};
 use crate::sys::netsys::NetSys;
@@ -38,12 +38,12 @@ pub class Net {
         return NetSys::routes();
     }
 
-    /** The route the system would use to reach `addr`; `Gone` when no route covers it. */
+    /** The route the system would use to reach `addr`; `Absent` when no route covers it. */
     pub static fn routeTo(addr : Addr) : RouteInfo ! SysError {
         let table : RouteTable = NetSys::routes();
         let at : i32 = table.indexFor(addr);
         if (at < 0) {
-            throw Gone("net.routeTo", "a route to " + addr.text());
+            throw Absent("net.routeTo", "route to " + addr.text());
         }
         return table.at(at).copy();
     }
@@ -53,20 +53,20 @@ pub class Net {
         return NetSys::routes().defaultGateway(4);
     }
 
-    /** The interface the default IPv4 route leaves by; `Gone` when there is no default route. */
+    /** The interface the default IPv4 route leaves by; `Absent` when there is no default route. */
     pub static fn primary() : IfaceInfo ! SysError {
         let routes : RouteTable = NetSys::routes();
         let ifaces : IfaceTable = NetSys::interfaces();
         let r : i32 = routes.defaultIndex(4);
         if (r < 0) {
-            throw Gone("net.primary", "a default route");
+            throw Absent("net.primary", "default route");
         }
         let mut at : i32 = ifaces.byIndex(routes.at(r).ifIndex);
         if (at < 0) {
             at = ifaces.find(routes.at(r).ifName);
         }
         if (at < 0) {
-            throw Gone("net.primary", "the interface " + routes.at(r).ifName);
+            throw Absent("net.primary", "interface " + routes.at(r).ifName);
         }
         return ifaces.at(at);
     }
@@ -78,7 +78,7 @@ pub class Net {
     pub static fn localAddress() : Addr ! SysError {
         try {
             return Net::primary().firstV4();
-        } catch e : Gone {
+        } catch e : Absent {
             return Addr::none();
         }
     }
@@ -90,7 +90,7 @@ pub class Net {
     pub static fn isOnline() : bool ! SysError {
         try {
             return Net::primary().up;
-        } catch e : Gone {
+        } catch e : Absent {
             return false;
         }
     }

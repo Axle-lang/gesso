@@ -115,7 +115,7 @@ names = [i.name for i in g.Procs.list()]
 check("the list is the seam's", names == ["init", "Shell", "editor", "Editor", "orphan"], names)
 tree = g.Procs.tree()
 check("the tree has the shape of the list", tree.rootCount() == 2 and list(tree.descendantsOf(1)) == [20, 21, 22])
-check("get finds one", g.Procs.get(21).name == "editor" and isinstance(thrown(lambda: g.Procs.get(99)), g.Gone))
+check("get finds one", g.Procs.get(21).name == "editor" and isinstance(thrown(lambda: g.Procs.get(99)), g.Absent))
 check("find ignores case and returns every match", [i.pid for i in g.Procs.find("EDITOR")] == [21, 22] and len(g.Procs.find("nothing")) == 0)
 check("a gone process is Gone, not a silent default", isinstance(thrown(lambda: g.Procs.imagePath(99)), g.Gone) and g.Procs.imagePath(21) == "/usr/bin/editor")
 check("priority reads through", g.Procs.priority(21) == P.High)

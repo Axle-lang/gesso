@@ -1,0 +1,39 @@
+<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="base.css">
+<style>
+.grid { display:grid; grid-template-columns: 1.15fr 1fr; gap: 0; }
+.code, .out { padding: 28px 32px; font-size: 18px; line-height: 1.75; }
+.code { border-right: 1px solid #2c2c44; }
+.out { background:#161624; border-radius: 0 18px 18px 0; color:#cfcce8 }
+.k { color:#8f84ff } .t { color:#7fd6a0 } .c { color:#6f6b96 } .s { color:#f0c95a } .f { color:#9db8ff }
+.line { white-space: pre; } .res { white-space: pre; color:#cfcce8 } .gap { height: 14px }
+.note { color:#8683a8; font-size:15px; }
+</style>
+<h1>Gesso · a short tour</h1>
+<h2>Readings that <em>narrow</em>, answers in plain words.</h2>
+<div class="card grid">
+<div class="code mono">
+<div class="line"><span class="k">let</span> tree : ProcTree = <span class="f">Procs::tree</span>();</div>
+<div class="line"><span class="k">let</span> mine : SocketTable = <span class="f">Net::sockets</span>().<span class="f">ofPid</span>(4120);</div>
+<div class="line"><span class="k">for</span> (i <span class="k">of</span> 0..mine.<span class="f">size</span>()) {</div>
+<div class="line">    <span class="f">println</span>(mine.<span class="f">at</span>(i).<span class="f">describe</span>());</div>
+<div class="line">}</div><div class="gap"></div>
+<div class="line"><span class="k">let</span> way : RouteInfo = <span class="f">Net::routeTo</span>(<span class="f">Addr::parse</span>(<span class="s">"192.168.1.77"</span>));</div>
+<div class="line"><span class="f">println</span>(way.<span class="f">describe</span>());</div><div class="gap"></div>
+<div class="line"><span class="k">let</span> power : PowerInfo = <span class="f">Power::now</span>();</div>
+<div class="line"><span class="f">println</span>(power.<span class="f">describe</span>());</div><div class="gap"></div>
+<div class="line"><span class="k">let</span> plan : Plan = <span class="f">Fs::planMakeLink</span>(<span class="s">"a.txt"</span>, <span class="s">"/data/l2"</span>);</div>
+<div class="line"><span class="f">println</span>(plan.<span class="f">describe</span>());</div>
+</div>
+<div class="out mono">
+<div class="res">tcp 192.168.1.20:51000 → 93.184.216.34:443
+    established (pid 4120)
+tcp 192.168.1.20:51001 → 192.168.1.5:445
+    established (pid 4120)</div><div class="gap"></div>
+<div class="res">192.168.1.0/24 dev Ethernet metric 100</div><div class="gap"></div>
+<div class="res">78% · on battery · 3 h 12 min left</div><div class="gap"></div>
+<div class="res">link /data/l2:
+  1. [change] make /data/l2 a symbolic
+     link to a.txt
+     (undo: delete the link /data/l2)</div>
+</div></div>
+<div class="foot">Printed by the library's own sources, translated to Python, over the fixed fake machine the tests use — the fixture's data, not yours. <span class="mono">examples/probe</span> prints the same kinds of lines from the real one.</div>

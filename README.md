@@ -1,125 +1,216 @@
 <div align="center">
 
-# gesso
+# 🎨 gesso
 
-### What an operating system exposes — as one library for Axle
+### What an operating system exposes — processes, network, files, power — as **one library**, written once, for [**Axle**](https://axle-lang.dev)
+
+**Not a pile of bindings.** Every program that watches a machine ends up writing the same page of `extern "C"`, the same record whose offsets were read off a header, and an error number that means something different on each platform. Gesso is that layer, once: readings that are plain data, refusals that name themselves, and one tree that builds for Windows and Linux.
+
+<p align="center">
+  <a href="https://axle-lang.dev"><img alt="Powered by Axle 0.18" src="https://img.shields.io/badge/powered%20by-Axle%200.18-5B4BE1?style=for-the-badge&labelColor=1b1b2b"></a>
+  <a href="https://github.com/Axle-lang/smalt"><img alt="Sibling of smalt" src="https://img.shields.io/badge/sibling%20of-smalt%20%C2%B7%20zaffre-1D6FB8?style=for-the-badge&labelColor=1b1b2b"></a>
+</p>
+<p align="center">
+  <img alt="Targets: Windows and Linux" src="https://img.shields.io/badge/targets-Windows%20%C2%B7%20Linux-FF7A45?style=flat-square&labelColor=1b1b2b">
+  <img alt="Dependencies: none" src="https://img.shields.io/badge/dependencies-none-2E7D32?style=flat-square&labelColor=1b1b2b">
+  <img alt="Unsafe: raw only" src="https://img.shields.io/badge/unsafe-raw%2F%20only-9C27B0?style=flat-square&labelColor=1b1b2b">
+  <img alt="Extern: sys ports only" src="https://img.shields.io/badge/extern%20%22C%22-sys%2F%20ports%20only-1D6FB8?style=flat-square&labelColor=1b1b2b">
+  <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-555555?style=flat-square&labelColor=1b1b2b">
+</p>
+
+<img src="doc/img/layers.png" width="100%">
+
+<sub>The layers, and the one place the system is touched. Every number in the footer is a thing the tools in <code>tools/</code> run.</sub>
+
+<br>
+
+<sub><a href="#-at-a-glance">At a glance</a> · <a href="#-highlights">Highlights</a> · <a href="#-quick-start">Quick start</a> · <a href="#-the-modules">Modules</a> · <a href="#-the-contract">Contract</a> · <a href="#-honest-status">Status</a> · <a href="doc/ARCHITECTURE.md">Architecture</a> · <a href="doc/CONTRACT.md">Contract doc</a> · <a href="doc/ROADMAP.md">Roadmap</a> · <a href="LIMITATIONS.md">Limitations</a> · <a href="https://axle-lang.dev">Axle ↗</a></sub>
 
 </div>
 
 ---
 
-A program that watches a machine ends up writing the same bindings over and over: the process list, the
-connection tables, the resolver's cache, the battery, the clipboard. Each one is a page of `extern "C"`,
-a record whose offsets were read off a header, and an error number that means something different on
-every platform.
+> **gesso** *(n.)* — the ground coat a painter lays on the panel before any paint: chalk and glue, the
+> thing between the picture and the wood.
+> That is the whole library. [smalt](https://github.com/Axle-lang/smalt) is the pigment and
+> [zaffre](https://github.com/Axle-lang/zaffre) the picture; gesso is what they are painted on — the
+> machine.
 
-**Gesso is that layer, written once.** It is named for the ground coat a painter lays on the panel
-before any paint: the thing between the picture and the wood.
+> **Status.** The portable half — parsers, tables, arithmetic, the whole API — is run, 315 checks, over fixed
+> fake machines. The half that touches the operating system (`raw/` and `sys/`) can only be proved on one:
+> `axle check` is the last word, `examples/probe` is the first program to run, and
+> [`LIMITATIONS.md`](LIMITATIONS.md) lists, one by one, what is proven, what is only checked, and which
+> record offsets have never met a machine.
 
-## Three tiers
+## 📊 At a glance
 
-A call is at one of three levels, and the level is in its path.
+| | |
+|---|---|
+| **Language** | 100% [Axle](https://axle-lang.dev) — no C, no vendored library, no `[link]` section: each OS library is named by the `extern "C" from "…"` block that imports from it |
+| **Platforms** | Windows x86-64 (`kernel32`, `advapi32`, `ntdll`, `iphlpapi`) and Linux x86-64 (`libc`, `/proc`, `/sys`, inotify, `statx`) — one source tree, the target picks the files. macOS and Android are not served: nothing here can test them, and a promise that cannot be kept is worse than none |
+| **Scope** | The processes, the network, the files and the power of a machine — what a monitor, a task manager or an installer reads. Processes, sockets with their owner, interfaces, routes, volumes, folders, a folder watcher, processor load and battery today; the desktop and diagnostics next |
+| **Readings** | Plain data. A `ProcInfo`, a `SocketInfo`, a `FileStat` is a copy of what the system said at one moment; it never changes afterwards, and carries a `key` that finds the same thing again in the next reading |
+| **Failure** | Every refusal is a `SysError` — an `IOException`, so a caller already declaring one carries it onward — and the most precise of eight reasons: `Denied` names the privilege it lacked, `Gone` and `Absent` say which, `Unsupported` says where. An OS number never reaches a caller bare, and nothing returns `false` for "the system said no" |
+| **Asking first** | Every `Change` and `Admin` operation has a `can…` that answers *yes*, *yes with this privilege*, *not here* or *cannot tell*, and a `plan…` that says what it would do and how to put it back — before it does anything |
+| **Portability** | A seam is one module path with one file per port. `tools/check.py` holds both files to the same public surface, keeps `extern "C"` inside `sys/<port>/` and `unsafe` inside `raw/`, and refuses a shared file that imports a module only one port has |
+| **Verification** | What cannot run without a machine is separated from what can: the portable half — parsers, tables, arithmetic, the whole API — is translated to Python and run, 315 checks, over fixed fake machines |
+| **Known limits** | All of them, with what each would take to lift: [`LIMITATIONS.md`](LIMITATIONS.md) |
 
-| Tier | Where | What it is |
-|---|---|---|
-| **Portable** | `gesso::proc`, `gesso::net`, … | the operations that mean the same thing on every port |
-| **Advanced** | `gesso::proc::win`, `gesso::net::linux`, … | what one platform has and the others do not, exposed rather than hidden |
-| **Raw** | `gesso::raw` | the pointers, the buffers, the UTF-16 — for the call Gesso does not wrap |
+## ✨ Highlights
 
-An Advanced function exists only in its port, so calling it on another target is a compile error, not a
-silent no-op.
+- 🌳 **Processes as the tree they are** — `Procs::tree()` lays the list out depth first. A parent that has exited, an id the system reused for a younger process, a process that names itself, a loop of parents: all become roots, never a lie about the shape.
+- 🔌 **Sockets that know their owner** — Windows answers with one call per table; on Linux the owner is found by searching every process's open files for the socket's inode, and a socket whose owner the system will not show reads `pid` −1 and is *counted* (`unowned()`), not hidden.
+- 🧭 **Addresses that behave** — one `Addr` for IPv4 and IPv6: parse any written form, print RFC 5952, `kind()` (private, loopback, link-local, public…), `inSubnet()`, and an IPv4-mapped IPv6 address equals its IPv4 twin.
+- 🔎 **Tables that narrow** — `Net::sockets().listening().ofPid(4120).external()`: each step is a new table of copied rows, so tables never share state and any of them may be kept.
+- 🗺️ **Routing that answers like the system** — `Net::routeTo(addr)` takes the longest prefix and, among equals, the lowest metric. `Net::primary()`, `gateway()`, `localAddress()`, `isOnline()` are built on it.
+- 📈 **Rates, not just counters** — `TrafficMeter` turns two readings into bytes per second, and treats a counter that went *down* as no measurement rather than a gigabyte per second. `CpuMeter` does the same for processor load.
+- 📁 **Files, with the parts `std` leaves out** — the volumes and the room left on each, a folder with the kind of every entry, a link *as a link*, a recursive size that never follows one, and a watcher whose queue is first-in first-out and says so when the system dropped events (`WatchState::Lost`) instead of guessing.
+- 🔒 **Privilege is part of the vocabulary** — `Access` is `Read`, `Change` or `Admin`; `Privilege` is `User`, `Elevated` or `System`; the process knows which it holds (the token on Windows, the effective user on Linux) and refuses early, while the system keeps the last word.
+- 🧪 **A checker, because there is no compiler here** — a parser written from the language's documentation, a resolver for names and arities, the layer and port rules, and a self-test that plants 25 faults and fails if any is accepted.
 
-## Three kinds of operation
+## 🚀 Quick start
 
-Every public operation says what it does to the machine, and refuses precisely when the system says no.
+```toml
+# your-program/axle.toml
+[package]
+name = "your-program"
 
-| Access | It… | Takes |
-|---|---|---|
-| `Read` | only looks | nothing |
-| `Change` | changes what an ordinary user may change | nothing |
-| `Admin` | changes the machine | an elevated session |
+[dependencies]
+gesso = { path = "../gesso" }
+```
 
-A refusal is never swallowed and never reduced to `false`: it is a `Denied` that names the operation, the
-object and the privilege that was missing. Before trying, a program can ask — `can…` answers "yes", "yes,
-with this privilege" or "not on this platform", and why. An operation that changes things has a twin that
-returns a `Plan` of what it would do, before it does it. See [doc/CONTRACT.md](doc/CONTRACT.md).
+```rs
+use gesso::{Net, Procs, Fs, Host, SocketTable, SocketInfo, ProcInfo, SpaceInfo, Bytes, SysError, Addr, RouteInfo};
 
-## The modules
+// `main` is the only place errors stop: every call below says what it can raise.
+fn main() : i32 {
+    try {
+        let me : i64 = Host::info().pid;
+
+        // What is this program talking to?
+        let mine : SocketTable = Net::sockets().ofPid(me).external();
+        for (i of 0..mine.size()) {
+            println(mine.at(i).describe());
+        }
+
+        // And which way does the internet go from here?
+        let way : RouteInfo = Net::routeTo(Addr::parse("8.8.8.8"));
+        println(way.describe());
+
+        // How full is the disk it lives on?
+        let disk : SpaceInfo = Fs::space(Procs::imagePath(me));
+        println(Bytes::human(disk.unused) + " free of " + Bytes::human(disk.total));
+        return 0;
+    } catch e : SysError {
+        println(e.message);        // "proc.imagePath: denied on process 4: needs an elevated administrator"
+        return 1;
+    }
+}
+```
+
+That is the whole setup: no DLL to copy, no prefix to find. Build `examples/probe` first on a new machine — it reads
+every part of the library once, prints it, and when the system refuses a reading it prints *why* and goes on to the next:
+
+```bash
+cd examples/probe
+axle build && ./target/probe
+```
+
+<div align="center"><img src="doc/img/tour.png" width="100%"></div>
+
+## 🧩 The modules
 
 | Module | For | Status |
 |---|---|---|
-| `core` | errors, privileges, support, plans, keys, time, units, text scanning, lists, addresses, readings, watchers | compiled; the portable logic run through the translated tests |
-| `raw` | memory, buffers, UTF-16 | compiled; run on Windows |
-| `system` | host, memory, uptime, processor load, battery | run on Windows; Linux compiled, its parsers checked on real `/proc` text |
-| `proc` | the process list and tree, image path, priority, signals | run on Windows (reading); Linux compiled and checked the same way |
-| `net` | sockets with their owner, interfaces, routes, traffic rates | reading run on Windows; Linux compiled and checked the same way; changing the network is held back until the reading is proved |
-| `fs` | volumes, free space, folder listing, links, read-only, folder watcher | listing, sizes, volumes and the folder watcher run on Windows; links and changes not yet run; Linux compiled |
+| `core` | errors, privileges, support, plans, keys, time, units, addresses, readings, parsers, watchers | written, **run** through the translated tests |
+| `raw` | pointer reads, bounded buffers, UTF-16 and UTF-8, socket addresses | written, not run |
+| `system` | host, memory, uptime, processor load, battery | both ports written, not run |
+| `proc` | the process list and tree, image path, priority, signals | both ports written, not run |
+| `net` | sockets with their owner, interfaces, routes, traffic rates | reading written on both ports, not run. *Changing* the network (routes, DNS) is held back until the reading has met a machine |
+| `fs` | volumes, free space, folder listing, links, read-only, a folder watcher | both ports written, not run |
 | `desk` | notifications, clipboard, hotkeys, windows, the session | planned |
-| `diag` | logs, events, crash reports, traces, counters | planned |
+| `diag` | event log, journal, crash reports, counters | planned |
 
-## A short tour
+The order, and why, is in [`doc/ROADMAP.md`](doc/ROADMAP.md).
 
-```axle
-let tree : ProcTree = Procs::tree();                          // processes as the tree they are
-let web : SocketTable = Net::sockets().ofPid(4120).external();  // what process 4120 says to the internet
-let way : RouteInfo = Net::routeTo(Addr::parse("8.8.8.8"));   // "default via 192.168.1.1 dev eth0 metric 100"
-let disk : SpaceInfo = Fs::space("/home");                    // used, free, available
-let cpu : CpuMeter = CpuMeter::start();  …  cpu.update();     // load since the last update
-```
+## 📜 The contract
 
-Readings are copies, tables narrow into new tables (`listening()`, `ofPid()`, `external()`), and every
-failure is a `SysError` that says what was attempted and why it was refused. `examples/probe` runs every
-reading once and prints it: build it first on a new machine.
+Every public operation says what it does to the machine, and refuses precisely when the system says no.
+Read it as three kinds of operation, and the one place a refusal can come from.
 
-The order, and why, is in [doc/ROADMAP.md](doc/ROADMAP.md).
+<div align="center"><img src="doc/img/contract.png" width="100%"></div>
 
-## Honest status
+The full text — the five promises, what a `Plan` is, why a guard is a courtesy and the system still decides —
+is [`doc/CONTRACT.md`](doc/CONTRACT.md).
 
-`axle build examples/probe` compiles the whole library for Windows and the probe runs on it: the host,
-the process table and tree, the sockets with their owners, the interfaces and the volumes read as they
-should. For Linux, `axle check --target x86_64-unknown-linux-gnu examples/probe` passes and the program
-compiles to an object file, but it cannot be linked or run from Windows (the standard library that ships
-is the Windows one). What stands in for a Linux run is a check of every libc constant and record offset
-against the real headers, and the parsers run on real `/proc` text. Read [LIMITATIONS.md](LIMITATIONS.md)
-for what that does and does not establish.
+## 🏛️ Architecture
 
-The compiler does not build a library on its own (`axle build` at the root says it needs a `main`), so the
-library is built through the program that uses it. What stands in for a compiler on the rest is in
-`tools/`: a parser written from the language's documentation, a checker for names, imports, layers and
-ports (the compiler is lax about imports), and a translator that runs the portable code as Python.
+Layers, bottom to top. **A module never reaches upward, and the API modules never see one another.**
 
 ```
-python3 tools/check.py             # parse, resolve, layers, ports, the seam rules
-python3 tools/check.py --selftest  # plant 25 faults; fail if one is accepted
-python3 tools/gen_lib.py --check   # src/lib.axle names every module
-axle fmt src examples tools/axpy/fakes && python3 tools/wrap.py   # the layout, then the long lists and comments
-python3 tools/axpy/test_core.py    # the portable logic, run
-python3 tools/axpy/test_proc.py    # processes
-python3 tools/axpy/test_net.py     # addresses, sockets, interfaces, routes
-python3 tools/axpy/test_fs.py      # files, volumes, the folder watcher's queue
-python3 tools/axpy/test_system.py  # processor load, power
+   api      system · proc · net · fs · (desk · diag)       what a program imports
+   sys      one seam per concern, one file per port        every extern "C", and only here
+              win32/  kernel32 · advapi32 · ntdll · iphlpapi
+              linux/  libc · files (/proc, /sys)
+   raw      Raw · Buf · Wide · Narrow                      every unsafe, and only here
+   core     errors · contract · readings · parsers         the vocabulary; no OS, fully tested
 ```
 
-## Reading the source
-
-[doc/ARCHITECTURE.md](doc/ARCHITECTURE.md) has the layers, the ports, how a seam is written, and how to add an
-operation. The short version: `core` is vocabulary, `raw` is the only place with `unsafe`, `sys` is the only
-place with `extern "C"` and has one directory per port, and the API modules sit on top and never see an
-operating system.
-
-## Building
-
-```bash
-git clone https://github.com/Axle-lang/gesso
-```
-
-Add it as a path dependency, as the other libraries here do:
+**How one tree builds for two systems.** There is no `#[cfg]` in Axle and none here. `axle.toml` declares the
+ports — a condition and the directories that carry it — and a module path resolves to the file of whichever
+port is active:
 
 ```toml
-[dependencies]
-gesso = { path = "vendor/gesso" }
+[port.win32]
+when = { os = "windows" }
+dirs = ["win32"]
+
+[port.linux]
+when = { os = "linux" }
+dirs = ["linux"]
 ```
 
-Axle 0.18. No SDK, no DLL: every OS library is named by the block that imports from it.
+`src/sys/win32/netsys.axle` and `src/sys/linux/netsys.axle` are both `crate::sys::netsys`. Nothing above `sys/`
+names an operating system, and the checker holds the sentence: it compares the two files' public classes and
+signatures, so a target with a missing answer fails *here*, not in a build far from the cause.
+[`doc/ARCHITECTURE.md`](doc/ARCHITECTURE.md) has the layers, how a seam is written and how to add an operation.
+
+## 🔬 Honest status
+
+`axle` is the compiler's word, and the OS-facing files only meet a machine when a program runs. What stands in for them runs beside it:
+
+| Tool | What it holds |
+|---|---|
+| `tools/check.py` | every file parses; names, arities, mutability and exhaustiveness resolve; layers never reach upward; `extern "C"` only in ports, `unsafe` only in `raw/`; every port answers a seam alike; a shared file imports only what every port has |
+| `tools/check.py --selftest` | plants 25 faults, one at a time, and fails if the checker accepts any |
+| `tools/gen_lib.py --check` | `src/lib.axle` names every module a build must see |
+| `tools/axpy/` | an Axle → Python translator that runs the portable half — 315 checks over fixed fake machines |
+
+```bash
+python3 tools/check.py
+python3 tools/check.py --selftest
+python3 tools/gen_lib.py --check
+for t in core proc net fs system; do python3 tools/axpy/test_$t.py; done
+tools/img/render.sh            # the pictures above, from tools/img/*.html
+```
+
+What these *cannot* tell: that an operating-system call works, or that a record offset is right —
+a wrong offset reads the wrong bytes without an error. The ones taken from a program known to work (netaudit's
+socket tables) are marked as such; the rest are not, and [`LIMITATIONS.md`](LIMITATIONS.md) says which. If
+`examples/probe` prints a nonsense number, that is where to look.
+
+## 🗂️ Where things are
+
+| | |
+|---|---|
+| `src/core/` | vocabulary and parsers — no operating system in it |
+| `src/raw/` | the only `unsafe` |
+| `src/sys/` | the seams: `win32/`, `linux/`, and `errno` which sorts an OS number into a reason |
+| `src/system/` `proc/` `net/` `fs/` | the API |
+| `examples/probe/` | reads everything once and prints it |
+| `doc/` | [architecture](doc/ARCHITECTURE.md) · [contract](doc/CONTRACT.md) · [roadmap](doc/ROADMAP.md) · `img/` |
+| `tools/` | the checker, the translator, the tests, the picture source |
+
+## License
 
 MIT.

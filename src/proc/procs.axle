@@ -19,7 +19,7 @@ use crate::core::process::{ProcInfo, Priority, Signal};
 use crate::core::privilege::{Access, Privilege};
 use crate::core::support::Support;
 use crate::core::plan::{Plan, PlanStep};
-use crate::core::error::{SysError, Gone};
+use crate::core::error::{SysError, Absent};
 use crate::core::list::List;
 use crate::core::text::Utf8;
 use crate::sys::procsys::ProcSys;
@@ -38,7 +38,7 @@ pub class Procs {
         return new ProcTree(ProcSys::list());
     }
 
-    /** The process `pid`; `Gone` when there is none. */
+    /** The process `pid`; `Absent` when there is none. */
     pub static fn get(pid : i64) : ProcInfo ! SysError {
         let all : ProcInfo[] = ProcSys::list();
         for (i of 0..all.length) {
@@ -46,7 +46,7 @@ pub class Procs {
                 return all[i].copy();
             }
         }
-        throw Gone("proc.get", ProcInfo::label(pid));
+        throw Absent("proc.get", ProcInfo::label(pid));
     }
 
     /**

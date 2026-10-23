@@ -98,7 +98,7 @@ check("tree size counts files, folders and bytes, links excluded", (ts.bytes, ts
 check("tree size of a path that is not there raises", isinstance(thrown(lambda: F.treeSize("/nope")), g.Gone))
 check("volumes and the one holding a path", F.volumes().size() == 2 and F.volumeOf("/data/sub").root == "/data" and F.volumeOf("/etc").root == "/")
 check("space", F.space("/data").used() == 600000)
-check("reading a link", F.readLink("/data/lnk") == "a.txt" and isinstance(thrown(lambda: F.readLink("/data/a.txt")), g.Gone))
+check("reading a link", F.readLink("/data/lnk") == "a.txt" and isinstance(thrown(lambda: F.readLink("/data/a.txt")), g.Invalid))
 check("can make a link: unknown here, decided by the folder", F.canMakeLink().state == g.SupportState.Unknown and F.canSetMode().state == g.SupportState.Unknown)
 pl = F.planMakeLink("a.txt", "/data/l2")
 check("plans say what and how to undo", pl.count() == 1 and "symbolic link" in pl.whatAt(0) and pl.reversible() and F.planSetReadOnly("/data/a.txt", True).reversible())

@@ -12,7 +12,7 @@
 //
 // and two volumes, / and /data.
 
-use crate::core::error::{SysError, Gone, Unsupported};
+use crate::core::error::{SysError, Gone, Invalid, Unsupported};
 use crate::core::fsinfo::{
     FileStat, EntryKind, DirEntry, EntryList, SpaceInfo, VolumeInfo, VolumeTable, VolumeKind,
 };
@@ -89,6 +89,9 @@ pub class FsSys {
     pub static fn readLink(path : string) : string ! SysError {
         if (path == "/data/lnk") {
             return "a.txt";
+        }
+        if (path == "/data/a.txt") {
+            throw Invalid("fs.readLink", path, "it is not a link");
         }
         throw Gone("fs.readLink", path);
     }

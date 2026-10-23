@@ -7,6 +7,7 @@
 //
 //   Denied       the system said no for want of a privilege: `needs` says which
 //   Unsupported  this platform has no such thing: `platform` and `feature` say what and where
+//   Absent       nothing matches what was asked for (no route to an address, no process of that id)
 //   Gone         the thing existed and no longer does (a process that exited between a listing and a read)
 //   Busy         the thing exists and is in use
 //   Invalid      an argument the system cannot accept: `argument` names it
@@ -69,6 +70,17 @@ pub exception Gone : SysError {
 
     constructor(op : string, what : string) {
         super(op, what + " no longer exists");
+        self.what = what;
+    }
+}
+
+/** Nothing matches what was asked for. Unlike `Gone`, the thing is not known ever to have existed. */
+pub exception Absent : SysError {
+    /** What was looked for. */
+    pub what : string;
+
+    constructor(op : string, what : string) {
+        super(op, "no " + what);
         self.what = what;
     }
 }

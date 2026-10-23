@@ -1,0 +1,46 @@
+<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="base.css">
+<style>
+.stack { display: grid; gap: 14px; }
+.layer { border-radius: 18px; padding: 22px 28px; display: grid; grid-template-columns: 210px 1fr; align-items: center; gap: 24px; border: 1px solid; }
+.layer .name { font-size: 26px; font-weight: 700; }
+.layer .note { font-size: 15px; opacity: .75; margin-top: 4px; font-weight: 400; }
+.api { background: linear-gradient(90deg,#2a2466,#1f2a5c); border-color: #4a41b0; }
+.sys { background: #1b2a2f; border-color: #2f5a63; }
+.raw { background: #2b2420; border-color: #6b4c36; }
+.core { background: #22202e; border-color: #4a4668; }
+.mods { display: flex; flex-wrap: wrap; gap: 12px; }
+.m { padding: 12px 20px; border-radius: 12px; background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.14); font-size: 22px; font-weight: 600; }
+.m small { display:block; font-size: 13px; font-weight: 400; opacity: .7; margin-top: 2px; }
+.m.todo { opacity: .45; border-style: dashed; }
+.ports { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.port { border-radius: 12px; padding: 12px 18px; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.14); }
+.port b { font-size: 20px; } .port div { font-size: 15px; opacity: .78; margin-top: 4px; line-height: 1.45; }
+.seam { font-size: 15px; opacity: .8; margin: 0 0 10px; }
+.legend { display:flex; gap:18px; margin-top: 22px; }
+.k { font-size:16px; color:#b9b6d6 } .k b { color:#e8e6f2 }
+</style>
+<h1>Gesso · architecture</h1>
+<h2>A module never reaches <em>upward</em>. The system is touched in <em>one</em> place.</h2>
+<div class="stack">
+  <div class="layer api"><div><div class="name">API</div><div class="note">what a program imports</div></div>
+    <div class="mods">
+      <div class="m">system<small>Host · CpuMeter · Power</small></div>
+      <div class="m">proc<small>Procs · ProcTree</small></div>
+      <div class="m">net<small>Net · TrafficMeter</small></div>
+      <div class="m">fs<small>Fs · FsWatcher</small></div>
+      <div class="m todo">desk<small>planned</small></div>
+      <div class="m todo">diag<small>planned</small></div>
+    </div></div>
+  <div class="layer sys"><div><div class="name">sys</div><div class="note">seams · every <span class="mono">extern "C"</span></div></div>
+    <div>
+      <div class="seam">One module path, one file per port. The checker holds both files to the same public surface.</div>
+      <div class="ports">
+        <div class="port"><b>win32</b><div class="mono">kernel32 · advapi32 · ntdll · iphlpapi<br>os · procsys · netsys · fssys · syssys</div></div>
+        <div class="port"><b>linux</b><div class="mono">libc · /proc · /sys · inotify · statx<br>os · procsys · netsys · fssys · syssys</div></div>
+      </div></div></div>
+  <div class="layer raw"><div><div class="name">raw</div><div class="note">every <span class="mono">unsafe</span></div></div>
+    <div class="mods"><div class="m">Raw<small>pointer reads</small></div><div class="m">Buf<small>bounded, freed</small></div><div class="m">Wide · Narrow<small>UTF-16 · UTF-8</small></div></div></div>
+  <div class="layer core"><div><div class="name">core</div><div class="note">vocabulary · no OS · fully tested</div></div>
+    <div class="mods"><div class="m">errors<small>Denied · Gone · Absent …</small></div><div class="m">contract<small>Access · Support · Plan</small></div><div class="m">readings<small>Addr · SocketInfo · FileStat</small></div><div class="m">parsers<small>/proc/net · mounts · stat</small></div></div></div>
+</div>
+<div class="legend"><div class="k"><b>63</b> source files</div><div class="k"><b>315</b> checks run on the portable half</div><div class="k"><b>25</b> planted faults the checker must reject</div></div>

@@ -26,6 +26,7 @@ it onward — and it is the most precise subclass that fits:
 | `Denied` | the system said no for want of a privilege | `what`, `needs` (a `Privilege`), `code` |
 | `Unsupported` | this platform has no such thing | `platform`, `feature` |
 | `Gone` | it existed and no longer does | `what` |
+| `Absent` | nothing matches what was asked for (no route to an address, no process of that id) | `what` |
 | `Busy` | it exists and is in use | `what` |
 | `Invalid` | an argument the system cannot accept | `argument` |
 | `Expired` | it took longer than it was given | `millis` |

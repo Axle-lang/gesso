@@ -192,7 +192,7 @@ check("sockets come through, owners and all", N.sockets().size() == 4 and N.sock
 check("who listens", N.sockets().listening().at(0).local.text() == "0.0.0.0:443")
 check("an unowned socket is counted, not hidden", N.sockets().unowned() == 1)
 check("the route to the internet is the default one", N.routeTo(A.parse("8.8.8.8")).isDefault() and N.routeTo(A.parse("192.168.1.77")).prefix == 24)
-check("no route to the other family is Gone, not a made-up answer", isinstance(thrown(lambda: N.routeTo(A.parse("2001:db8::1"))), g.Gone))
+check("no route to the other family is Absent, not a made-up answer", isinstance(thrown(lambda: N.routeTo(A.parse("2001:db8::1"))), g.Absent))
 check("gateway", N.gateway().text() == "192.168.1.1")
 check("the primary interface is the one the default route leaves by", N.primary().name == "eth0")
 check("the local address", N.localAddress().text() == "192.168.1.20")

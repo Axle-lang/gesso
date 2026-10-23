@@ -8,7 +8,7 @@
 // developer mode is on. Asking for it without either is refused by the system and arrives as `Denied`
 // naming the elevated session.
 
-use crate::core::error::{SysError, Gone, Unsupported};
+use crate::core::error::{SysError, Gone, Invalid, Unsupported};
 use crate::core::fsinfo::{PathText, FileStat, DirEntry, EntryList, SpaceInfo, VolumeTable};
 use crate::core::fswatch::ChangeFeed;
 use crate::core::watch::{Watch, WatchState};
@@ -144,7 +144,7 @@ pub class FsSys {
         let code : i32 = GetLastError();
         CloseHandle(h);
         if (ok == 0 && code == ERROR_NOT_A_REPARSE_POINT) {
-            throw Gone("fs.readLink", path + " is not a link");
+            throw Invalid("fs.readLink", path, "it is not a link");
         }
         if (ok == 0) {
             Errno::win32("fs.readLink", path, code);

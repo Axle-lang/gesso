@@ -6,7 +6,7 @@
 // blocks for at most the time it is given. Only the folder's own entries are watched, not those of its
 // subfolders.
 
-use crate::core::error::{SysError, Gone};
+use crate::core::error::{SysError, Gone, Invalid};
 use crate::core::fsinfo::{PathText, FileStat, EntryKind, DirEntry, EntryList, SpaceInfo, VolumeTable};
 use crate::core::fsparse::MountText;
 use crate::core::fswatch::ChangeFeed;
@@ -115,7 +115,7 @@ pub class FsSys {
     pub static fn readLink(path : string) : string ! SysError {
         let st : FileStat = FsSys::stat(path);
         if (!st.isLink()) {
-            throw Gone("fs.readLink", path + " is not a link");
+            throw Invalid("fs.readLink", path, "it is not a link");
         }
         return Files::linkOf(path);
     }
