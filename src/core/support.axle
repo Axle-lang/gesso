@@ -1,0 +1,101 @@
+// support — asking whether an operation can be done, before trying it.
+//
+// A program that offers a button for "set priority" should know whether the button will work: not by
+// pressing it and seeing the system refuse, but by asking. A `Capability` names an operation; each
+// module has a `can…` function that answers with a `Support`, which says yes, or "yes, with this
+// privilege", or "not on this platform", or "cannot tell" — and in every case but yes, why.
+
+use crate::core::privilege::{Access, Privilege};
+
+/** Whether an operation can be carried out. */
+pub enum SupportState : i32 {
+    /** It can. */
+    Yes = 0,
+
+    /** It can, once the process holds a higher privilege. */
+    NeedsPrivilege = 1,
+
+    /** This platform has no such thing. */
+    Unsupported = 2,
+
+    /** Only trying will tell: the answer depends on the object the operation is aimed at. */
+    Unknown = 3,
+}
+
+/** An operation, named: `module`, `name`, and what it does. */
+pub struct Capability {
+    /** The module: "proc", "net". */
+    pub module : string = "";
+
+    /** The operation within it: "setPriority", "addRoute". */
+    pub name   : string = "";
+
+    /** What it does to the machine. */
+    pub access : Access = Access::Read;
+
+    /** The capability as the library spells an operation: "proc.setPriority". */
+    pub fn label(self) : string {
+        return self.module + "." + self.name;
+    }
+}
+
+/** The answer to "can this be done". */
+pub struct Support {
+    /** Yes, with a privilege, no, or cannot tell. */
+    pub state  : SupportState = SupportState::Unknown;
+
+    /** The privilege that would be enough, when `state` is `NeedsPrivilege`. */
+    pub needs  : Privilege = Privilege::User;
+
+    /** Why not, or why only with that privilege; empty for yes. */
+    pub reason : string = "";
+
+    /** It can be done. */
+    pub static fn yes() : Support {
+        return Support { state: SupportState::Yes };
+    }
+
+    /** It can be done by a process holding `needs`, and `reason` says why it takes one. */
+    pub static fn withPrivilege(needs : Privilege, reason : string) : Support {
+        return Support { state: SupportState::NeedsPrivilege, needs: needs, reason: reason };
+    }
+
+    /** This platform has no such thing, and `reason` says what is missing. */
+    pub static fn unsupported(reason : string) : Support {
+        return Support { state: SupportState::Unsupported, reason: reason };
+    }
+
+    /** Only trying will tell. */
+    pub static fn unknown(reason : string) : Support {
+        return Support { state: SupportState::Unknown, reason: reason };
+    }
+
+    /**
+     * Whether a process holding `have` can go ahead: yes, or with a privilege it has. Unknown counts as "try
+     * it".
+     */
+    pub fn usableBy(self, have : Privilege) : bool {
+        return match self.state {
+            SupportState::Yes | SupportState::Unknown => true,
+            SupportState::NeedsPrivilege => have.covers(self.needs),
+            SupportState::Unsupported => false,
+        };
+    }
+
+    /** ": " and the reason, or nothing when there is none. */
+    fn because(self) : string {
+        return self.reason.byteLength > 0 ? ": " + self.reason : "";
+    }
+
+    /**
+     * A sentence for a tooltip or a log: "yes", "needs an elevated administrator: changes the routing table".
+     */
+    pub fn explain(self) : string {
+        return match self.state {
+            SupportState::Yes => "yes",
+            SupportState::NeedsPrivilege => "needs " + self.needs.label() + self.because(),
+            SupportState::Unsupported => "not available here" + self.because(),
+            SupportState::Unknown => "cannot tell without trying" + self.because(),
+        };
+    }
+}

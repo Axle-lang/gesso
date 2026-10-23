@@ -1,0 +1,25 @@
+// guard — the check an operation makes before it asks the system, and the refusal when it fails.
+//
+// Some operations cannot work without a privilege, and the system's own refusal arrives late, as a
+// bare number from deep in a call. A `Guard` makes the same decision early, from what the process
+// already knows about itself, and refuses with the reason in the caller's terms: which operation,
+// aimed at what, needing which standing. It is a courtesy and not a security boundary — the system
+// still decides — so a call that passes the guard can still be refused, and is reported the same way.
+
+use crate::core::privilege::Privilege;
+use crate::core::error::Denied;
+
+/** Early refusals. */
+pub class Guard {
+    /** Do nothing if `have` is enough where `needs` is required; otherwise refuse, naming `op` and `what`. */
+    pub static fn require(
+        have : Privilege,
+        needs : Privilege,
+        op : string,
+        what : string
+    ) : void ! Denied {
+        if (!have.covers(needs)) {
+            throw Denied(op, what, needs, 0);
+        }
+    }
+}

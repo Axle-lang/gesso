@@ -1,0 +1,114 @@
+// plan — what an operation would do, said before it is done.
+//
+// An operation that changes the machine has a twin that only says what it would change. The twin
+// returns a `Plan`: each step as a sentence, what kind of step it is, and how to put it back. A program
+// shows the plan and asks; a script prints it; a test compares it. Nothing in a plan has been done.
+
+use crate::core::list::{List, Copy};
+use crate::core::privilege::{Access, Privilege};
+
+/** One thing an operation would do. */
+pub class PlanStep : Copy<PlanStep> {
+    /** What it would do, as a sentence: "set the priority of process 4120 to below normal". */
+    pub what   : string;
+
+    /** What kind of step it is. */
+    pub access : Access;
+
+    /** How to undo it, as a sentence; empty when it cannot be undone. */
+    pub undo   : string;
+
+    /** A step of `access` saying `what`, which `undo` says how to put back (empty for no way back). */
+    constructor(what : string, access : Access, undo : string) {
+        self.what = what;
+        self.access = access;
+        self.undo = undo;
+    }
+
+    /** A separate object with the same step. */
+    pub fn copy(self) : PlanStep {
+        return new PlanStep(self.what, self.access, self.undo);
+    }
+}
+
+/** The steps an operation would take, in order. */
+pub class Plan {
+    /** What the operation is called. */
+    pub title : string;
+    steps     : List<PlanStep>;
+
+    /** An empty plan for the operation `title`. */
+    constructor(title : string) {
+        self.title = title;
+        self.steps = new List<PlanStep>();
+    }
+
+    /** Add a step at the end. */
+    pub fn add(mut self, own step : PlanStep) : void {
+        self.steps.add(step);
+    }
+
+    /** Add a step of `access` saying `what`, with no way back. */
+    pub fn note(mut self, access : Access, what : string) : void {
+        self.add(new PlanStep(what, access, ""));
+    }
+
+    /** How many steps there are. */
+    pub fn count(self) : i32 {
+        return self.steps.size();
+    }
+
+    /** What step `i` would do. */
+    pub fn whatAt(self, i : i32) : string {
+        return self.steps.at(i).what;
+    }
+
+    /** What kind of step step `i` is. */
+    pub fn accessAt(self, i : i32) : Access {
+        return self.steps.at(i).access;
+    }
+
+    /** How step `i` is undone; empty when it cannot be. */
+    pub fn undoAt(self, i : i32) : string {
+        return self.steps.at(i).undo;
+    }
+
+    /** The most serious kind of step in the plan. */
+    pub fn highest(self) : Access {
+        let mut top : Access = Access::Read;
+        for (i of 0..self.steps.size()) {
+            if ((self.steps.at(i).access as i32) > (top as i32)) {
+                top = self.steps.at(i).access;
+            }
+        }
+        return top;
+    }
+
+    /** The privilege the plan as a whole takes. */
+    pub fn needs(self) : Privilege {
+        return self.highest().needs();
+    }
+
+    /** Whether every step can be undone. */
+    pub fn reversible(self) : bool {
+        for (i of 0..self.steps.size()) {
+            if (self.steps.at(i).undo.byteLength == 0 && self.steps.at(i).access != Access::Read) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** The plan as text, one numbered line per step. */
+    pub fn describe(self) : string {
+        let mut out : string = self.title + ":";
+        for (i of 0..self.steps.size()) {
+            let s : PlanStep = self.steps.at(i);
+            out = out + "\n  " + (i + 1).toString() + ". [" + s.access.label() + "] " + s.what;
+            if (s.undo.byteLength > 0) {
+                out = out + " (undo: " + s.undo + ")";
+            }
+        }
+        return out;
+    }
+}

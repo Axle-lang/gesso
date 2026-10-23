@@ -1,0 +1,68 @@
+// clock — instants and spans, in whole nanoseconds.
+//
+// Everything the library timestamps is an `i64` count of nanoseconds on a clock that only goes
+// forward (`Clock::mono`), or a count of milliseconds since 1970 for wall time (`Clock::wall`). A
+// reading is stamped when it is taken, so a program can say how old a figure is, and tell a figure
+// that is stale from one that is merely unchanged.
+
+/** Reading the clocks. */
+pub class Clock {
+    /** The monotonic clock, in nanoseconds: only differences mean anything. */
+    pub static fn mono() : i64 {
+        return nanoTime();
+    }
+
+    /** Wall-clock time, in milliseconds since 1970. */
+    pub static fn wall() : i64 {
+        return now();
+    }
+}
+
+/** Lengths of time, in nanoseconds. */
+pub class Span {
+    /** `n` milliseconds. */
+    pub static fn millis(n : i64) : i64 {
+        return n * 1000000;
+    }
+
+    /** `n` seconds. */
+    pub static fn seconds(n : i64) : i64 {
+        return n * 1000000000;
+    }
+
+    /** `n` minutes. */
+    pub static fn minutes(n : i64) : i64 {
+        return n * 60000000000;
+    }
+
+    /** `ns` as whole milliseconds. */
+    pub static fn toMillis(ns : i64) : i64 {
+        return ns / 1000000;
+    }
+
+    /** `ns` in the largest unit that keeps it above one: "850 ms", "8 s", "3 min", "2 h", "5 d". */
+    pub static fn human(ns : i64) : string {
+        let ms : i64 = ns / 1000000;
+        if (ms < 1000) {
+            return ms.toString() + " ms";
+        }
+        let s : i64 = ms / 1000;
+        if (s < 60) {
+            return s.toString() + " s";
+        }
+        let m : i64 = s / 60;
+        if (m < 60) {
+            return m.toString() + " min";
+        }
+        let h : i64 = m / 60;
+        if (h < 48) {
+            return h.toString() + " h";
+        }
+        return (h / 24).toString() + " d";
+    }
+
+    /** How long ago `then` was, when it is now `now`; never negative. */
+    pub static fn age(now : i64, then : i64) : i64 {
+        return now > then ? now - then : 0;
+    }
+}

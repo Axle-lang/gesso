@@ -1,0 +1,51 @@
+// watch — waiting for the system to say something happened.
+//
+// Some things are read once (a list of processes); others change while the program looks away: a
+// directory, the routing table, the power state. Those are watched. A watcher is a handle on the
+// operating system's own notification: `wait` blocks for up to a time and says whether something is
+// ready, and the module that made the watcher has its own way to take what is ready (a file watcher
+// has `next()` returning a file event). The handle is released with `close`, on every path.
+//
+// A watcher never makes anything up: if the system could not tell what changed (it dropped events,
+// or the buffer overflowed), the watcher says so with a state of its own rather than a guess.
+
+use crate::core::error::SysError;
+
+/** What a watcher has to report. */
+pub enum WatchState : i32 {
+    /** Something is ready to be taken. */
+    Ready = 0,
+
+    /** Nothing happened within the time given. */
+    Idle = 1,
+
+    /**
+     * The system dropped events: what changed is unknown, and the caller should read the whole thing again.
+     */
+    Lost = 2,
+
+    /** The watcher is closed, or what it watched is gone. */
+    Closed = 3,
+
+    /** Its name in a sentence. */
+    pub fn label(self) : string {
+        return match self {
+            WatchState::Ready => "ready",
+            WatchState::Idle => "idle",
+            WatchState::Lost => "lost events",
+            WatchState::Closed => "closed",
+        };
+    }
+}
+
+/** A handle on a stream of system events. */
+pub trait Watch {
+    /** Wait up to `timeoutMs` milliseconds (0 to poll, -1 for as long as it takes) and say what is there. */
+    fn wait(mut self, timeoutMs : i32) : WatchState ! SysError;
+
+    /** Release the handle. Closing twice is harmless. */
+    fn close(mut self) : void;
+
+    /** Whether the watcher is still open. */
+    fn isOpen(self) : bool;
+}

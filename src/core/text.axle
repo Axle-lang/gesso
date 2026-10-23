@@ -1,0 +1,168 @@
+// text — the two encodings a system API speaks: UTF-8 in Axle, UTF-16 on Windows.
+//
+// An Axle `string` is UTF-8. Windows' wide functions take UTF-16 code units, and answer in them. The
+// conversions are here, over plain `i32` arrays of units, so they are checked without a pointer:
+// `raw/wide` moves the units to and from memory.
+
+use std::text::StringBuilder;
+
+/** The codepoint standing for a byte sequence that does not decode. */
+const REPLACEMENT : i32 = 65533;
+
+/** UTF-8 decoding. */
+pub class Utf8 {
+    /**
+     * How many bytes the codepoint that starts with byte `lead` takes; 0 for a byte that cannot start one.
+     */
+    pub static fn width(lead : i32) : i32 {
+        return match lead {
+            0..=127 => 1,
+            192..=223 => 2,
+            224..=239 => 3,
+            240..=247 => 4,
+            _ => 0,
+        };
+    }
+
+    /**
+     * The codepoint starting at byte `i` of `s`, and how many bytes it takes (1 for a bad byte, 0 at the
+     * end).
+     */
+    pub static fn next(s : string, i : i64) : (cp: i32, n: i32) {
+        if (i >= s.byteLength) {
+            return (0, 0);
+        }
+        let lead : i32 = s.byteAt(i);
+        let width : i32 = Utf8::width(lead);
+        if (width == 0 || i + (width as i64) > s.byteLength) {
+            return (REPLACEMENT, 1);
+        }
+        let mut cp : i32 = width == 1 ? lead : lead & (127 >> width);
+        for (k of 1..width) {
+            let b : i32 = s.byteAt(i + (k as i64));
+            if ((b & 192) != 128) {
+                return (REPLACEMENT, 1);
+            }
+            cp = (cp << 6) | (b & 63);
+        }
+        return (cp, width);
+    }
+
+    /**
+     * The bytes of `s` from `a` up to `b`, as text; the cuts are clamped to the string and must fall between
+     * codepoints.
+     */
+    pub static fn slice(s : string, a : i64, b : i64) : string {
+        let lo : i64 = a < 0 ? 0 : a;
+        let hi : i64 = b > s.byteLength ? s.byteLength : b;
+        let sb : StringBuilder = new StringBuilder();
+        let mut i : i64 = lo;
+        while (i < hi) {
+            let (cp, used) = Utf8::next(s, i);
+            sb.appendChar(cp);
+            i = i + (used as i64);
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Whether `a` and `b` are the same text when the capitals of ASCII are not told from the small letters.
+     */
+    pub static fn sameFolded(a : string, b : string) : bool {
+        if (a.byteLength != b.byteLength) {
+            return false;
+        }
+        for (i of 0..a.byteLength) {
+            let mut x : i32 = a.byteAt(i);
+            let mut y : i32 = b.byteAt(i);
+            if (x >= 65 && x <= 90) {
+                x = x + 32;
+            }
+            if (y >= 65 && y <= 90) {
+                y = y + 32;
+            }
+            if (x != y) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** How many codepoints `s` holds. */
+    pub static fn count(s : string) : i32 {
+        let mut i : i64 = 0;
+        let mut n : i32 = 0;
+        while (i < s.byteLength) {
+            let (cp, used) = Utf8::next(s, i);
+            i = i + (used as i64);
+            n = n + 1;
+        }
+        return n;
+    }
+}
+
+/** UTF-16 encoding and decoding, as arrays of code units. */
+pub class Utf16 {
+    /** Whether `u` is the first unit of a surrogate pair. */
+    static fn isHigh(u : i32) : bool {
+        return u >= 55296 && u < 56320;
+    }
+
+    /** Whether `u` is the second unit of a surrogate pair. */
+    static fn isLow(u : i32) : bool {
+        return u >= 56320 && u < 57344;
+    }
+
+    /** How many UTF-16 code units `s` takes. */
+    pub static fn length(s : string) : i32 {
+        let mut i : i64 = 0;
+        let mut n : i32 = 0;
+        while (i < s.byteLength) {
+            let (cp, used) = Utf8::next(s, i);
+            i = i + (used as i64);
+            n = n + (cp >= 65536 ? 2 : 1);
+        }
+        return n;
+    }
+
+    /** `s` as code units, `length(s)` of them. */
+    pub static fn encode(s : string) : i32[] {
+        let n : i32 = Utf16::length(s);
+        let mut units : i32[] = malloc<i32>((n + 1) as i64);
+        let mut i : i64 = 0;
+        let mut k : i32 = 0;
+        while (i < s.byteLength) {
+            let (cp, used) = Utf8::next(s, i);
+            i = i + (used as i64);
+            if (cp >= 65536) {
+                let v : i32 = cp - 65536;
+                units[k as i64] = 55296 + (v >> 10);
+                units[(k + 1) as i64] = 56320 + (v & 1023);
+                k = k + 2;
+            } else {
+                units[k as i64] = cp;
+                k = k + 1;
+            }
+        }
+        units[n as i64] = 0;
+        return units;
+    }
+
+    /** The text in the first `n` code units of `units`; a lone surrogate becomes U+FFFD. */
+    pub static fn decode(units : i32[], n : i32) : string {
+        let sb : StringBuilder = new StringBuilder();
+        let mut k : i32 = 0;
+        while (k < n) {
+            let u : i32 = units[k as i64];
+            let low : i32 = k + 1 < n ? units[(k + 1) as i64] : 0;
+            if (Utf16::isHigh(u) && Utf16::isLow(low)) {
+                sb.appendChar(65536 + ((u - 55296) << 10) + (low - 56320));
+                k = k + 2;
+            } else {
+                sb.appendChar(Utf16::isHigh(u) || Utf16::isLow(u) ? REPLACEMENT : u);
+                k = k + 1;
+            }
+        }
+        return sb.toString();
+    }
+}

@@ -1,0 +1,56 @@
+// index — a table from a number to a small integer, for finding a record again by its identity.
+//
+// A reading of the system is a list; relating its rows to one another (a process to its parent, a
+// socket to its owner) means finding a row by an identifier, many times. `PidIndex` is a hash table
+// with open addressing over two arrays: no allocation per entry, no boxing, and a lookup that is a few
+// probes. Identifiers are non-negative; a lookup that finds nothing answers -1.
+
+/**
+ * A table from a non-negative `i64` to an `i32`. It holds the number of entries it was made for and no more.
+ */
+pub class PidIndex {
+    keys   : i64[];
+    values : i32[];
+    mask   : i64;
+
+    /** A table with room for at least `capacity` entries. */
+    constructor(capacity : i32) {
+        let mut size : i64 = 16;
+        while (size < (capacity as i64) * 2) {
+            size = size * 2;
+        }
+        self.keys = malloc<i64>(size);
+        self.values = malloc<i32>(size);
+        self.mask = size - 1;
+        for (i of 0..size) {
+            self.keys[i] = -1;
+        }
+    }
+
+    /** Where the probe for `key` starts. */
+    pub(file) fn home(self, key : i64) : i64 {
+        return ((key * 0x9E3779B1) ^ (key >> 7)) & self.mask;
+    }
+
+    /** Record that `key` stands for `value`; a second `put` of the same key replaces the first. */
+    pub fn put(mut self, key : i64, value : i32) : void {
+        let mut at : i64 = self.home(key);
+        while (self.keys[at] != -1 && self.keys[at] != key) {
+            at = (at + 1) & self.mask;
+        }
+        self.keys[at] = key;
+        self.values[at] = value;
+    }
+
+    /** What `key` stands for, or -1 when it was never put. */
+    pub fn get(self, key : i64) : i32 {
+        let mut at : i64 = self.home(key);
+        while (self.keys[at] != -1) {
+            if (self.keys[at] == key) {
+                return self.values[at];
+            }
+            at = (at + 1) & self.mask;
+        }
+        return -1;
+    }
+}

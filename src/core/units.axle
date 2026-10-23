@@ -1,0 +1,61 @@
+// units — figures as a reader wants them: sizes, rates, shares.
+//
+// A system API answers in bytes and nanoseconds; a person reads "1.5 GiB" and "3 s". These are written
+// over integers, because Axle's `toString()` on a real prints however many digits the value happens to
+// have, which is right for a debugger and wrong for a label.
+
+/** Sizes and rates. */
+pub class Bytes {
+    /** The names of the binary units, smallest first. */
+    pub(file) static fn unitName(k : i32) : string {
+        let names : string[] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+        return names[k as i64];
+    }
+
+    /** `n` bytes in the largest binary unit that keeps it at one or more: "512 B", "1.5 KiB", "3.2 GiB". */
+    pub static fn human(n : i64) : string {
+        if (n < 1024) {
+            return n.toString() + " B";
+        }
+        let mut k : i32 = 0;
+        let mut unit : i64 = 1;
+        while (k < 5 && n / unit >= 1024) {
+            unit = unit * 1024;
+            k = k + 1;
+        }
+        let mut whole : i64 = n / unit;
+        let mut tenth : i64 = ((n % unit) * 10 + unit / 2) / unit;
+        if (tenth >= 10) {
+            whole = whole + 1;
+            tenth = 0;
+        }
+        if (whole >= 1024 && k < 5) {
+            whole = 1;
+            tenth = 0;
+            k = k + 1;
+        }
+        return whole.toString() + "." + tenth.toString() + " " + Bytes::unitName(k);
+    }
+
+    /** `n` bytes per second, in the same units: "1.5 MiB/s". */
+    pub static fn rate(n : i64) : string {
+        return Bytes::human(n) + "/s";
+    }
+}
+
+/** Shares of a whole. */
+pub class Percent {
+    /** `part` of `whole` in tenths of a percent (1000 is all of it); 0 when there is no whole. */
+    pub static fn tenths(part : i64, whole : i64) : i64 {
+        if (whole <= 0) {
+            return 0;
+        }
+        return (part * 1000) / whole;
+    }
+
+    /** `part` of `whole`, written "42.5 %". */
+    pub static fn text(part : i64, whole : i64) : string {
+        let t : i64 = Percent::tenths(part, whole);
+        return (t / 10).toString() + "." + (t % 10).toString() + " %";
+    }
+}

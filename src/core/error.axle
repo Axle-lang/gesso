@@ -1,0 +1,121 @@
+// error — what the library throws, and why.
+//
+// An operation the operating system refuses must say so, precisely; it is never ignored and never
+// reduced to `false`. Every failure is a `SysError`, which is an `IOException`, so a caller that
+// already declares `! IOException` carries it onward unchanged. The subclasses are the reasons that
+// callers act on differently:
+//
+//   Denied       the system said no for want of a privilege: `needs` says which
+//   Unsupported  this platform has no such thing: `platform` and `feature` say what and where
+//   Gone         the thing existed and no longer does (a process that exited between a listing and a read)
+//   Busy         the thing exists and is in use
+//   Invalid      an argument the system cannot accept: `argument` names it
+//   Expired      the operation took longer than it was given
+//   OsFailure    anything else the system reported, with its own `code`
+//
+// `op` is the operation, spelled as the library spells it: "proc.setPriority", "net.addRoute".
+
+use crate::core::privilege::Privilege;
+
+/** Everything the library throws. */
+pub exception SysError : IOException {
+    /** The operation that failed. */
+    pub op : string;
+
+    constructor(op : string, message : string) {
+        super(op + ": " + message);
+        self.op = op;
+    }
+}
+
+/** The system refused for want of a privilege. */
+pub exception Denied : SysError {
+    /** What was being touched: a path, a process id, an interface name. */
+    pub what  : string;
+
+    /** The standing that would have been enough. */
+    pub needs : Privilege;
+
+    /** The system's own code, 0 when it gave none. */
+    pub code  : i32;
+
+    constructor(op : string, what : string, needs : Privilege, code : i32) {
+        super(op, "denied on " + what + ": needs " + needs.label());
+        self.what = what;
+        self.needs = needs;
+        self.code = code;
+    }
+}
+
+/** This platform has no such thing. */
+pub exception Unsupported : SysError {
+    /** The platform: "windows", "linux". */
+    pub platform : string;
+
+    /** What was asked for. */
+    pub feature  : string;
+
+    constructor(op : string, platform : string, feature : string) {
+        super(op, feature + " is not available on " + platform);
+        self.platform = platform;
+        self.feature = feature;
+    }
+}
+
+/** The thing existed and no longer does. */
+pub exception Gone : SysError {
+    /** What vanished. */
+    pub what : string;
+
+    constructor(op : string, what : string) {
+        super(op, what + " no longer exists");
+        self.what = what;
+    }
+}
+
+/** The thing exists and is in use. */
+pub exception Busy : SysError {
+    /** What is in use. */
+    pub what : string;
+
+    constructor(op : string, what : string) {
+        super(op, what + " is in use");
+        self.what = what;
+    }
+}
+
+/** An argument the system cannot accept. */
+pub exception Invalid : SysError {
+    /** The argument. */
+    pub argument : string;
+
+    constructor(op : string, argument : string, why : string) {
+        super(op, "invalid " + argument + ": " + why);
+        self.argument = argument;
+    }
+}
+
+/** The operation took longer than it was given. */
+pub exception Expired : SysError {
+    /** How long it was given, in milliseconds. */
+    pub millis : i64;
+
+    constructor(op : string, millis : i64) {
+        super(op, "no answer within " + millis.toString() + " ms");
+        self.millis = millis;
+    }
+}
+
+/** Anything else the system reported. */
+pub exception OsFailure : SysError {
+    /** The system's own code. */
+    pub code : i32;
+
+    constructor(op : string, code : i32, text : string) {
+        super(
+            op,
+            "the system answered " + code.toString() + (text.byteLength > 0 ? " (" + text + ")" : "")
+        );
+        self.code = code;
+    }
+}

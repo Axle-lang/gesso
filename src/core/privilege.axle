@@ -1,0 +1,64 @@
+// privilege — what an operation does, and what it takes to do it.
+//
+// Every public operation in the library falls under one `Access` and says which, so a reader can tell
+// before calling whether it only looks, changes something an ordinary user may change, or changes the
+// machine. `Privilege` is the other half: the standing a process has. An operation is refused for want
+// of one, and the refusal (`Denied`, in core/error) names the privilege that was missing.
+
+/** What an operation does to the machine. */
+pub enum Access : i32 {
+    /** It only looks. */
+    Read = 0,
+
+    /** It changes something an ordinary user may change: their own process, their own files. */
+    Change = 1,
+
+    /** It changes the machine itself, and needs an elevated session. */
+    Admin = 2,
+
+    /** One word for it: "read", "change", "admin". */
+    pub fn label(self) : string {
+        return match self {
+            Access::Read => "read",
+            Access::Change => "change",
+            Access::Admin => "admin",
+        };
+    }
+
+    /** The least privilege an operation of this access can be carried out with. */
+    pub fn needs(self) : Privilege {
+        return match self {
+            Access::Admin => Privilege::Elevated,
+            _ => Privilege::User,
+        };
+    }
+}
+
+/** The standing a process has. */
+pub enum Privilege : i32 {
+    /** An ordinary user. */
+    User = 0,
+
+    /** An elevated administrator session: a full Administrators token on Windows, root on Linux. */
+    Elevated = 1,
+
+    /**
+     * The system itself: LocalSystem or a service account on Windows, a process holding the kernel's
+     * capabilities.
+     */
+    System = 2,
+
+    /** What it is called in a sentence: "an ordinary user", "an elevated administrator". */
+    pub fn label(self) : string {
+        return match self {
+            Privilege::User => "an ordinary user",
+            Privilege::Elevated => "an elevated administrator",
+            Privilege::System => "the system account",
+        };
+    }
+
+    /** Whether holding this privilege is enough where `needed` is required. */
+    pub fn covers(self, needed : Privilege) : bool {
+        return (self as i32) >= (needed as i32);
+    }
+}

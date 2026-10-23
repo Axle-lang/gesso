@@ -1,0 +1,111 @@
+// list — sequences that grow as things are added to them.
+//
+// Every reading of the system is a list of rows whose number nobody knows beforehand: the entries of a
+// folder, the sockets of the machine, the steps of a plan. The tables of this library wrap a `List` and
+// add the questions that suit their rows; the growing is written once, here.
+//
+// Growing means moving the rows into a bigger array, and an array of objects cannot be moved by
+// aliasing its elements: two arrays would own the same object. So a `List` asks its rows to be `Copy`,
+// and grows by copying them. Numbers and strings need no copying and go in a `Values`.
+
+/** A class that can make a separate object with the same reading. */
+pub trait Copy<T> {
+    fn copy(self) : T;
+}
+
+/** A sequence of rows, in the order they were added. */
+pub class List<T : Copy> {
+    rows : T[];
+    used : i32 = 0;
+    room : i32;
+
+    /** An empty list. */
+    constructor() {
+        self.room = 16;
+        self.rows = malloc<T>(self.room as i64);
+    }
+
+    /** Put `item` at the end; the list takes it over. */
+    pub fn add(mut self, own item : T) : void {
+        if (self.used == self.room) {
+            let mut bigger : T[] = malloc<T>((self.room * 2) as i64);
+            for (i of 0..self.used) {
+                bigger[i as i64] = self.rows[i as i64].copy();
+            }
+            self.rows = bigger;
+            self.room = self.room * 2;
+        }
+        self.rows[self.used as i64] = item;
+        self.used = self.used + 1;
+    }
+
+    /** How many there are. */
+    pub fn size(self) : i32 {
+        return self.used;
+    }
+
+    /** The one at position `i`. */
+    pub fn at(self, i : i32) : T {
+        return self.rows[i as i64];
+    }
+
+    /** Put `item` in place of the one at position `i`. */
+    pub fn set(mut self, i : i32, own item : T) : void {
+        self.rows[i as i64] = item;
+    }
+
+    /** Copies of all of them, as an array. */
+    pub fn toArray(self) : T[] {
+        let mut out : T[] = malloc<T>(self.used as i64);
+        for (i of 0..self.used) {
+            out[i as i64] = self.rows[i as i64].copy();
+        }
+        return out;
+    }
+}
+
+/** A sequence of numbers or strings, in the order they were added. */
+pub class Values<T> {
+    items : T[];
+    used  : i32 = 0;
+    room  : i32;
+
+    /** An empty sequence. */
+    constructor() {
+        self.room = 16;
+        self.items = malloc<T>(self.room as i64);
+    }
+
+    /** Put `v` at the end. */
+    pub fn add(mut self, own v : T) : void {
+        if (self.used == self.room) {
+            let mut bigger : T[] = malloc<T>((self.room * 2) as i64);
+            for (i of 0..self.used) {
+                bigger[i as i64] = self.items[i as i64];
+            }
+            self.items = bigger;
+            self.room = self.room * 2;
+        }
+        self.items[self.used as i64] = v;
+        self.used = self.used + 1;
+    }
+
+    /** How many there are. */
+    pub fn size(self) : i32 {
+        return self.used;
+    }
+
+    /** The one at position `i`. */
+    pub fn at(self, i : i32) : T {
+        return self.items[i as i64];
+    }
+
+    /** All of them, as an array. */
+    pub fn toArray(self) : T[] {
+        let mut out : T[] = malloc<T>(self.used as i64);
+        for (i of 0..self.used) {
+            out[i as i64] = self.items[i as i64];
+        }
+        return out;
+    }
+}

@@ -1,0 +1,59 @@
+// ident — the one hash every identity in the library is folded with.
+//
+// A process, an interface, a connection, a volume: each is looked up again later, across readings, by
+// what it is rather than by where it happened to sit in the last list. The key of a thing is a hash of
+// what identifies it, and this file is the one place that hash is made — two folds over the same
+// bytes would give two keys, and a record stored under one and searched under the other would exist
+// and never be found.
+//
+// FNV-1a over 64 bits, with the sign bit cleared: a key is never negative, so 0 and -1 stay free to
+// mean "none" and "not yet".
+
+/** Identity keys. */
+pub class Key {
+    /** What no key is ever equal to: the answer for "there is no such thing". */
+    pub static NONE : i64 = -1;
+
+    /** The value every fold starts from. */
+    pub static fn seed() : i64 {
+        return 0x2545F4914F6CDD1D;
+    }
+
+    /** One more number folded into a running key. */
+    pub static fn step(h : i64, v : i64) : i64 {
+        let x : i64 = h ^ v;
+        return (x * 0x100000001B3) & 0x7FFFFFFFFFFFFFFF;
+    }
+
+    /** The key of a number. */
+    pub static fn ofNumber(v : i64) : i64 {
+        return Key::step(Key::seed(), v);
+    }
+
+    /** The key of a text, byte by byte. */
+    pub static fn ofText(s : string) : i64 {
+        let mut h : i64 = Key::seed();
+        let n : i64 = s.byteLength;
+        for (i of 0..n) {
+            h = Key::step(h, s.byteAt(i) as i64);
+        }
+        return h;
+    }
+
+    /** The key of a kind of thing and a number inside it: the same number in two kinds gives two keys. */
+    pub static fn scoped(kind : string, v : i64) : i64 {
+        return Key::step(Key::ofText(kind), v);
+    }
+
+    /** The key of two numbers taken together. */
+    pub static fn pair(a : i64, b : i64) : i64 {
+        return Key::step(Key::step(Key::seed(), a), b);
+    }
+
+    /**
+     * The key of a thing named by a number and a text: a process id and its start time, a name and a family.
+     */
+    pub static fn named(v : i64, name : string) : i64 {
+        return Key::step(Key::ofText(name), v);
+    }
+}
