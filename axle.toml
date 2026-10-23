@@ -1,0 +1,27 @@
+[package]
+name = "gesso"
+version = "0.1.0"
+kind = "lib"
+# The targets the library promises to serve. The promise is what the port checks enforce: an
+# incomplete port is an error only for a target named here. macOS and Android are not named, on
+# purpose: nothing here can be tested on them, and a promise that cannot be kept is worse than none.
+targets = ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"]
+
+# No `[dependencies]` and no `[link]` section. Gesso reads the operating system and nothing else:
+# every library it needs is named by the `extern "C" from "…"` block that imports from it —
+# `kernel32`, `advapi32` and `ntdll` in src/sys/win32/, `c` in src/sys/linux/ — so a consumer links what it
+# uses, and only what its own target compiles, without being told twice.
+
+# The ports: one condition, and the directories that carry it.
+#
+# Everything that touches the machine is behind a seam in `src/sys/`: `src/sys/win32/os.axle` and
+# `src/sys/linux/os.axle` are both the module `crate::sys::os`, and the build's target picks the file.
+# Nothing above `sys/` names an operating system, and `tools/check.py` holds that sentence, along with
+# the rule that every port answers a seam with the same public functions and signatures.
+[port.win32]
+when = { os = "windows" }
+dirs = ["win32"]
+
+[port.linux]
+when = { os = "linux" }
+dirs = ["linux"]
