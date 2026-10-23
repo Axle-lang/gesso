@@ -1,0 +1,161 @@
+// sys/netproc — the socket files of `/proc/net` and the `getifaddrs` records, for the Linux network seam.
+
+use crate::core::error::{SysError, Gone};
+use crate::core::index::PidIndex;
+use crate::core::list::Values;
+use crate::core::netaddr::Addr;
+use crate::core::netinfo::{Proto, SocketTable, IfaceInfo, IfaceTable, IfaceKind, LinkInfo};
+use crate::core::netparse::{NetText, SocketScan, DevRow};
+use crate::core::scan::Scan;
+use crate::sys::errno::Errno;
+use crate::sys::files::Files;
+use crate::sys::procfiles::ProcFiles;
+use crate::sys::libc::{getifaddrs, freeifaddrs, IFA_NEXT, IFA_NAME, IFA_ADDR, IFA_NETMASK, AF_INET, AF_INET6};
+use crate::raw::mem::Raw;
+use crate::raw::buf::Buf;
+use crate::raw::sockaddr::SockAddr;
+use crate::raw::wide::Narrow;
+
+/** Reading what the Linux network seam is built from. */
+pub class NetProc {
+    /** Add the sockets of `file` to `scan`, if the kernel has it (a kernel without IPv6 has no `tcp6`). */
+    pub static fn load(file : string, proto : Proto, scan : SocketScan) : void ! SysError {
+        try {
+            NetText::sockets(Files::slurp("net.sockets", file), proto, scan);
+        } catch e : Gone {
+            // This protocol is not on this kernel.
+        }
+    }
+
+    /** Find the owner of every socket in `scan` from the open files of every process. */
+    pub static fn findOwners(scan : SocketScan) : void {
+        let byInode : PidIndex = new PidIndex(scan.table.size());
+        for (i of 0..scan.inodes.size()) {
+            if (scan.inodes.at(i) > 0) {
+                byInode.put(scan.inodes.at(i), i);
+            }
+        }
+        let mut pids : Values<i64> = new Values<i64>();
+        try {
+            pids = ProcFiles::pids();
+        } catch e : SysError {
+            return;
+        }
+        for (p of 0..pids.size()) {
+            NetProc::claimSockets(scan.table, byInode, pids.at(p));
+        }
+    }
+
+    /** Give the sockets that process `pid` holds open to it. */
+    static fn claimSockets(table : SocketTable, byInode : PidIndex, pid : i64) : void {
+        let fdDir : string = "/proc/" + pid.toString() + "/fd/";
+        try {
+            let fds : string[] = Files::names("net.owners", fdDir);
+            for (f of 0..fds.length) {
+                let inode : i64 = NetText::socketInode(Files::linkOf(fdDir + fds[f]));
+                let row : i32 = inode > 0 ? byInode.get(inode) : -1;
+                if (row >= 0) {
+                    table.setOwner(row, pid);
+                }
+            }
+        } catch e : SysError {
+            // Not ours to look into, or gone: its sockets stay unowned.
+        }
+    }
+
+    /** The interface a line of `/proc/net/dev` names, with what `/sys/class/net/<name>` says of it. */
+    pub static fn interfaceOf(row : DevRow) : IfaceInfo {
+        let base : string = "/sys/class/net/" + row.name + "/";
+        let index : i64 = Scan::number(Files::tryRead(base + "ifindex"));
+        let iface : IfaceInfo = new IfaceInfo(index < 0 ? 0 : index as i32, row.name, row.name);
+        iface.link(NetProc::linkOf(row.name));
+        if (row.rx >= 0 && row.tx >= 0) {
+            iface.traffic(row.rx, row.tx);
+        }
+        return iface;
+    }
+
+    /** What the files of the interface `name` say of its link. */
+    static fn linkOf(name : string) : LinkInfo {
+        let base : string = "/sys/class/net/" + name + "/";
+        let arphrd : i64 = Scan::number(Files::tryRead(base + "type"));
+        let virtualDevice : bool = Scan::has(Files::linkOf("/sys/class/net/" + name), "/virtual/");
+        let kind : IfaceKind = NetText::kindOf(
+            arphrd,
+            Files::isDir(base + "wireless"),
+            virtualDevice
+        );
+        return LinkInfo {
+            mac: Scan::line(Files::tryRead(base + "address")),
+            kind: kind,
+            up: NetProc::isUp(Files::tryRead(base + "operstate"), kind),
+            mtu: Scan::number(Files::tryRead(base + "mtu")) as i32,
+            speedBps: NetProc::speed(Files::tryRead(base + "speed")),
+        };
+    }
+
+    /** Give each interface in `table` the addresses `getifaddrs` lists for it. */
+    pub static fn addresses(table : IfaceTable) : void ! SysError {
+        let head : Buf = new Buf(8);
+        if (getifaddrs(head.ptr()) != 0) {
+            Errno::posix("net.interfaces", "the address list", Files::errno());
+        }
+        let first : ptr = Raw::ptrAt(head.ptr(), 0);
+        let mut e : ptr = first;
+        while (!Raw::isNil(e)) {
+            NetProc::addAddress(table, e);
+            e = Raw::ptrAt(e, IFA_NEXT);
+        }
+        freeifaddrs(first);
+    }
+
+    /**
+     * Give the interface that the `ifaddrs` record `e` is for the address it holds, if it is an internet one.
+     */
+    static fn addAddress(table : IfaceTable, e : ptr) : void {
+        let sa : ptr = Raw::ptrAt(e, IFA_ADDR);
+        if (Raw::isNil(sa)) {
+            return;
+        }
+        let family : i32 = Raw::u16At(sa, 0);
+        let at : i32 = table.find(Narrow::read(Raw::ptrAt(e, IFA_NAME), 64));
+        if ((family != AF_INET && family != AF_INET6) || at < 0) {
+            return;
+        }
+        let mask : ptr = Raw::ptrAt(e, IFA_NETMASK);
+        let bits : i32 = Raw::isNil(mask) ? 0 : NetText::prefixOf(NetProc::addrOf(mask));
+        table.at(at).addAddress(NetProc::addrOf(sa), bits);
+    }
+
+    /**
+     * The address of the `sockaddr` at `sa`, or the unspecified IPv4 address for a family this does not read.
+     */
+    static fn addrOf(sa : ptr) : Addr {
+        return match Raw::u16At(sa, 0) {
+            AF_INET => SockAddr::at(sa, false),
+            AF_INET6 => SockAddr::at(sa, true),
+            _ => Addr::none(),
+        };
+    }
+
+    /**
+     * Whether `operstate` says the link is up; a loopback or a virtual link reports "unknown" and counts as
+     * up.
+     */
+    static fn isUp(state : string, kind : IfaceKind) : bool {
+        return match Scan::line(state) {
+            "up" => true,
+            "unknown" => kind == IfaceKind::Loopback || kind == IfaceKind::Virtual,
+            _ => false,
+        };
+    }
+
+    /**
+     * The speed the `speed` file gives in megabits per second, as bits per second; 0 when unknown (a down
+     * link answers -1 or fails).
+     */
+    static fn speed(text : string) : i64 {
+        let mbit : i64 = Scan::number(text);
+        return mbit > 0 ? mbit * 1000000 : 0;
+    }
+}

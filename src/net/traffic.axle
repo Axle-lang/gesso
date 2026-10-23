@@ -1,0 +1,108 @@
+// traffic — bytes per second, from two readings of an interface's counters.
+//
+//     let meter : TrafficMeter = new TrafficMeter();
+//     loop { meter.sample(Net::interfaces(), Clock::mono()); … meter.rxPerSecond("eth0") … }
+//
+// A counter is a total since the interface came up; a rate is the difference between two readings over
+// the time between them. The meter keeps the last reading and answers from the last two. The first
+// sample has nothing to compare with and answers 0; an interface whose counter went *down* (it was
+// reset, or the system wrapped a 32-bit counter) also answers 0 for that interval rather than a huge
+// number, since a negative difference is no measurement.
+
+use crate::core::list::Values;
+use crate::core::netinfo::{IfaceInfo, IfaceTable};
+
+/**
+ * What the meter keeps of one interface: its counters at the last reading and the rates since the one before.
+ */
+struct Counter {
+    name   : string = "";
+    rx     : i64 = 0;
+    tx     : i64 = 0;
+    rxRate : i64 = 0;
+    txRate : i64 = 0;
+}
+
+/** Rates over a sequence of readings. */
+pub class TrafficMeter {
+    rows : Values<Counter>;
+    at   : i64 = -1;
+
+    /** A meter with no readings. */
+    constructor() {
+        self.rows = new Values<Counter>();
+    }
+
+    /** The position in the last reading of the interface called `name`, or -1. */
+    fn slot(self, name : string) : i32 {
+        for (i of 0..self.rows.size()) {
+            if (self.rows.at(i).name == name) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * The difference of two counters over `millis`, as a rate per second; 0 when the counter went back or no
+     * time passed.
+     */
+    static fn rate(before : i64, now : i64, millis : i64) : i64 {
+        if (millis <= 0 || now < before) {
+            return 0;
+        }
+        return ((now - before) * 1000) / millis;
+    }
+
+    /** Take a reading of `ifaces` made at `atMillis` (any steady clock, in milliseconds). */
+    pub fn sample(mut self, ifaces : IfaceTable, atMillis : i64) : void {
+        let next : Values<Counter> = new Values<Counter>();
+        let elapsed : i64 = atMillis - self.at;
+        for (i of 0..ifaces.size()) {
+            let iface : IfaceInfo = ifaces.at(i);
+            let mut row : Counter = Counter {
+                name: iface.name,
+                rx: iface.rxBytes,
+                tx: iface.txBytes,
+            };
+            let before : i32 = self.at < 0 ? -1 : self.slot(iface.name);
+            if (before >= 0) {
+                row.rxRate = TrafficMeter::rate(self.rows.at(before).rx, row.rx, elapsed);
+                row.txRate = TrafficMeter::rate(self.rows.at(before).tx, row.tx, elapsed);
+            }
+            next.add(row);
+        }
+        self.rows = next;
+        self.at = atMillis;
+    }
+
+    /** Bytes per second received by `name` between the last two readings; 0 for an unknown interface. */
+    pub fn rxPerSecond(self, name : string) : i64 {
+        let i : i32 = self.slot(name);
+        return i < 0 ? 0 : self.rows.at(i).rxRate;
+    }
+
+    /** Bytes per second sent by `name` between the last two readings. */
+    pub fn txPerSecond(self, name : string) : i64 {
+        let i : i32 = self.slot(name);
+        return i < 0 ? 0 : self.rows.at(i).txRate;
+    }
+
+    /** Bytes per second received by every interface together. */
+    pub fn rxTotal(self) : i64 {
+        let mut sum : i64 = 0;
+        for (i of 0..self.rows.size()) {
+            sum = sum + self.rows.at(i).rxRate;
+        }
+        return sum;
+    }
+
+    /** Bytes per second sent by every interface together. */
+    pub fn txTotal(self) : i64 {
+        let mut sum : i64 = 0;
+        for (i of 0..self.rows.size()) {
+            sum = sum + self.rows.at(i).txRate;
+        }
+        return sum;
+    }
+}

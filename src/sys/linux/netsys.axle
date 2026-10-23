@@ -1,0 +1,56 @@
+// sys/netsys — the network, on Linux: `/proc/net`, `/sys/class/net` and `getifaddrs`.
+//
+// Sockets come from the four files `/proc/net/tcp`, `tcp6`, `udp` and `udp6`, read by `core/netparse`.
+// Those files name no owner, only an inode; the owner is found by looking through every process's open
+// files (`/proc/<pid>/fd`) for a link `socket:[inode]`. A process the caller may not look into cannot be
+// searched, so its sockets stay unowned (`pid` -1) — the table's `unowned()` says how many, and an
+// elevated session sees them all. That is the system's rule, reported rather than hidden.
+//
+// Interfaces are the names in `/proc/net/dev`, with what `/sys/class/net/<name>` says of each and
+// their addresses from `getifaddrs`.
+
+use crate::core::error::{SysError, Gone};
+use crate::core::list::Values;
+use crate::core::netinfo::{Proto, SocketTable, IfaceTable, RouteTable};
+use crate::core::netparse::{NetText, SocketScan, DevRow};
+use crate::sys::files::Files;
+use crate::sys::netproc::NetProc;
+
+/** The network. */
+pub class NetSys {
+    /** Every TCP and UDP socket, with its owner where the system lets us see it. */
+    pub static fn sockets() : SocketTable ! SysError {
+        let scan : SocketScan = new SocketScan();
+        NetProc::load("/proc/net/tcp", Proto::Tcp, scan);
+        NetProc::load("/proc/net/tcp6", Proto::Tcp, scan);
+        NetProc::load("/proc/net/udp", Proto::Udp, scan);
+        NetProc::load("/proc/net/udp6", Proto::Udp, scan);
+        NetProc::findOwners(scan);
+        return scan.table;
+    }
+
+    /** Every network interface. */
+    pub static fn interfaces() : IfaceTable ! SysError {
+        let rows : Values<DevRow> = NetText::devRows(
+            Files::slurp("net.interfaces", "/proc/net/dev")
+        );
+        let table : IfaceTable = new IfaceTable();
+        for (i of 0..rows.size()) {
+            table.add(NetProc::interfaceOf(rows.at(i)));
+        }
+        NetProc::addresses(table);
+        return table;
+    }
+
+    /** The routing table, IPv4 and IPv6. */
+    pub static fn routes() : RouteTable ! SysError {
+        let table : RouteTable = new RouteTable();
+        NetText::routes4(Files::slurp("net.routes", "/proc/net/route"), table);
+        try {
+            NetText::routes6(Files::slurp("net.routes", "/proc/net/ipv6_route"), table);
+        } catch e : Gone {
+            // No IPv6 on this kernel.
+        }
+        return table;
+    }
+}

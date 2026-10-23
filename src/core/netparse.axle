@@ -1,0 +1,263 @@
+// netparse — reading the text Linux keeps about the network: `/proc/net/tcp`, `route`, `dev`, and friends.
+//
+// Linux answers "what sockets are open" with files of columns. They are read here from text already
+// in hand, so the layout rules are checked on real lines without a machine; the port reads the files
+// and gives their text to this file.
+//
+// Two details bite. The hexadecimal addresses of `/proc/net/tcp` are the in-memory bytes of the address
+// printed as a number — on a little-endian machine, 127.0.0.1 is `0100007F`, least significant byte
+// first — while `/proc/net/ipv6_route` prints plain bytes in order. And the owner of a socket is not in
+// the file at all: only its inode is, and the port finds the process holding it.
+
+use crate::core::netaddr::{Addr, Endpoint};
+use crate::core::netinfo::{Proto, TcpState, SocketInfo, SocketTable, RouteInfo, RouteTable, IfaceKind};
+use crate::core::list::Values;
+use crate::core::scan::{Scan, Line, Field};
+
+/** The sockets read so far, and the inode each one is held by (in the same order, -1 when not known). */
+pub class SocketScan {
+    /** The sockets. */
+    pub table  : SocketTable;
+
+    /** The inode of each, in the order of `table`. */
+    pub inodes : Values<i64>;
+
+    /** A scan with nothing read yet. */
+    constructor() {
+        self.table = new SocketTable();
+        self.inodes = new Values<i64>();
+    }
+}
+
+/** One line of `/proc/net/dev`: an interface and the bytes that went through it. */
+pub struct DevRow {
+    pub name : string = "";
+    pub rx   : i64 = 0;
+    pub tx   : i64 = 0;
+}
+
+/** Linux's text, read. */
+pub class NetText {
+    /** The IPv4 address whose bytes, least significant first, make the number `w`. */
+    static fn v4Of(w : i64) : Addr {
+        return Addr::v4(
+            (w & 255) as i32,
+            ((w >> 8) & 255) as i32,
+            ((w >> 16) & 255) as i32,
+            ((w >> 24) & 255) as i32
+        );
+    }
+
+    /**
+     * The address of the field `f` as `/proc/net/tcp` writes it: 8 hex digits for IPv4, 32 for IPv6, each
+     * four bytes least significant first. An unreadable address is the unspecified one.
+     */
+    pub(file) static fn procAddr(f : Field) : Addr {
+        return match f.size() {
+            8 => f.hex() < 0 ? Addr::none() : NetText::v4Of(f.hex()),
+            32 => NetText::procV6(f),
+            _ => Addr::none(),
+        };
+    }
+
+    /** The IPv6 address of 32 hex digits made of four words, each with its bytes least significant first. */
+    static fn procV6(f : Field) : Addr {
+        let mut groups : i32[] = malloc<i32>(8 as i64);
+        for (k of 0..4) {
+            let at : i64 = f.lo + (k as i64) * 8;
+            let word : i64 = Scan::hex(f.src, at, at + 8);
+            if (word < 0) {
+                return Addr::v6(0, 0, 0, 0, 0, 0, 0, 0);
+            }
+            // Four bytes b0 b1 b2 b3, least significant first: the groups are (b0 b1) and (b2 b3).
+            groups[(k * 2) as i64] = (((word & 255) << 8) | ((word >> 8) & 255)) as i32;
+            groups[(k * 2 + 1) as i64] = ((((word >> 16) & 255) << 8) | ((word >> 24) & 255)) as i32;
+        }
+        return Addr::fromGroups(groups);
+    }
+
+    /** The address of the field `f`, 32 hex digits in plain byte order. */
+    pub(file) static fn plainV6(f : Field) : Addr {
+        let mut groups : i32[] = malloc<i32>(8 as i64);
+        for (k of 0..8) {
+            let at : i64 = f.lo + (k as i64) * 4;
+            let word : i64 = Scan::hex(f.src, at, at + 4);
+            if (word < 0) {
+                return Addr::v6(0, 0, 0, 0, 0, 0, 0, 0);
+            }
+            groups[k as i64] = word as i32;
+        }
+        return Addr::fromGroups(groups);
+    }
+
+    /** The endpoint `ADDR:PORT` in the field `f`. */
+    pub(file) static fn procEndpoint(f : Field) : Endpoint {
+        let found : i64 = Scan::lastIndexOf(f.src, 58, f.lo, f.hi);
+        let colon : i64 = found < 0 ? f.lo : found;
+        let address : Field = Field { src: f.src, lo: f.lo, hi: colon };
+        let port : Field = Field { src: f.src, lo: colon + 1, hi: f.hi };
+        return new Endpoint(NetText::procAddr(address), port.hex() < 0 ? 0 : port.hex() as i32);
+    }
+
+    /**
+     * Add to `scan` the sockets listed in `text`, the content of `/proc/net/tcp`, `tcp6`, `udp` or `udp6`,
+     * and the inode of each. Owners are not known yet: they are -1. Lines that are not rows (the header)
+     * are skipped.
+     */
+    pub static fn sockets(text : string, proto : Proto, scan : SocketScan) : void {
+        let mut at : i64 = 0;
+        while (at < text.byteLength) {
+            let row : Line = Line::at(text, at);
+            at = row.next();
+            let slot : Field = row.field(0);
+            let state : i64 = row.field(3).hex();
+            let inode : i64 = row.field(9).dec();
+            // A row starts with its number and a colon ("12:"); the header does not.
+            if (slot.lastByte() != 58 || state < 0 || inode < 0) {
+                continue;
+            }
+            let tcp : bool = proto == Proto::Tcp;
+            scan.table.add(
+                new SocketInfo(
+                    proto,
+                    NetText::procEndpoint(row.field(1)),
+                    NetText::procEndpoint(row.field(2)),
+                    tcp ? TcpState::fromLinux(state as i32) : TcpState::Open,
+                    -1
+                )
+            );
+            scan.inodes.add(inode);
+        }
+    }
+
+    /** The inode a link such as `socket:[12345]` names, or -1 when it is not a socket. */
+    pub static fn socketInode(target : string) : i64 {
+        let prefix : string = "socket:[";
+        let last : i64 = target.byteLength - 1;
+        if (!Scan::startsAt(target, 0, prefix) || target.byteAt(last) != 93) {
+            return -1;
+        }
+        return Scan::dec(target, prefix.byteLength, last);
+    }
+
+    /** How many leading bits of the byte `b` are ones. */
+    static fn leadingOnes(b : i32) : i32 {
+        let mut n : i32 = 0;
+        while (n < 8 && ((b >> (7 - n)) & 1) == 1) {
+            n = n + 1;
+        }
+        return n;
+    }
+
+    /** The number of leading one bits in `mask`. */
+    pub static fn prefixOf(mask : Addr) : i32 {
+        let mut bits : i32 = 0;
+        for (i of 0..mask.width()) {
+            let ones : i32 = NetText::leadingOnes(mask.byteAt(i));
+            bits = bits + ones;
+            if (ones < 8) {
+                return bits;
+            }
+        }
+        return bits;
+    }
+
+    /** Add to `table` the IPv4 routes of `/proc/net/route` (`text`) that are up. */
+    pub static fn routes4(text : string, table : RouteTable) : void {
+        let mut at : i64 = 0;
+        while (at < text.byteLength) {
+            let row : Line = Line::at(text, at);
+            at = row.next();
+            let flags : i64 = row.field(3).hex();
+            let metric : i64 = row.field(6).dec();
+            let isRoute : bool = row.field(1).size() == 8 && row.field(7).present();
+            if (!isRoute || flags < 0 || (flags & 1) == 0 || metric < 0) {
+                continue;
+            }
+            let mask : Addr = NetText::procAddr(row.field(7));
+            table.add(
+                new RouteInfo(
+                    NetText::procAddr(row.field(1)),
+                    NetText::prefixOf(mask),
+                    NetText::procAddr(row.field(2)),
+                    0,
+                    row.field(0).text(),
+                    metric as i32
+                )
+            );
+        }
+    }
+
+    /** Add to `table` the IPv6 routes of `/proc/net/ipv6_route` (`text`) that are up. */
+    pub static fn routes6(text : string, table : RouteTable) : void {
+        let mut at : i64 = 0;
+        while (at < text.byteLength) {
+            let row : Line = Line::at(text, at);
+            at = row.next();
+            let flags : i64 = row.field(8).hex();
+            let prefix : i64 = row.field(1).hex();
+            let metric : i64 = row.field(5).hex();
+            let isRoute : bool = row.field(
+                0
+            ).size() == 32 && row.field(4).size() == 32 && row.field(9).present();
+            if (!isRoute || flags < 0 || (flags & 1) == 0 || prefix < 0 || metric < 0) {
+                continue;
+            }
+            table.add(
+                new RouteInfo(
+                    NetText::plainV6(row.field(0)),
+                    prefix as i32,
+                    NetText::plainV6(row.field(4)),
+                    0,
+                    row.field(9).text(),
+                    metric as i32
+                )
+            );
+        }
+    }
+
+    /** The interfaces `/proc/net/dev` (`text`) lists, in order, with their byte counters. */
+    pub static fn devRows(text : string) : Values<DevRow> {
+        let rows : Values<DevRow> = new Values<DevRow>();
+        let mut at : i64 = 0;
+        while (at < text.byteLength) {
+            let line : Line = Line::at(text, at);
+            at = line.next();
+            let colon : i64 = Scan::indexOf(text, 58, line.start, line.end);
+            if (colon < 0) {
+                continue;
+            }
+            // "  eth0: 601242 … " — the name is before the colon, the counters after it.
+            let head : Line = Line { src: text, start: line.start, end: colon };
+            let counters : Line = Line { src: text, start: colon + 1, end: line.end };
+            let name : Field = head.field(0);
+            if (name.present()) {
+                rows.add(
+                    DevRow {
+                        name: name.text(),
+                        rx: counters.field(0).dec(),
+                        tx: counters.field(8).dec(),
+                    }
+                );
+            }
+        }
+        return rows;
+    }
+
+    /**
+     * What kind of link an interface is, from the `type` file (`arphrd`: 1 Ethernet, 772 loopback), whether
+     * it has a `wireless` directory, and whether its sysfs entry lies under `virtual`.
+     */
+    pub static fn kindOf(arphrd : i64, wireless : bool, virtualDevice : bool) : IfaceKind {
+        if (arphrd == 772) {
+            return IfaceKind::Loopback;
+        }
+        if (wireless) {
+            return IfaceKind::Wifi;
+        }
+        if (virtualDevice) {
+            return IfaceKind::Virtual;
+        }
+        return arphrd == 1 ? IfaceKind::Ethernet : IfaceKind::Other;
+    }
+}

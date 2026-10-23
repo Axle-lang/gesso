@@ -1,0 +1,716 @@
+// netinfo — what the network looks like at one moment: sockets, interfaces, routes.
+//
+// These are readings, not live objects: each is a copy of what the system said, and does not change
+// afterwards. A socket is found again in a later reading by its `key`, which is the same for the same
+// flow whatever the state it is in and whoever owns it.
+//
+// A table of sockets answers questions by *narrowing*: `table.listening().ofPid(4120)` is a new table of
+// the rows that pass, each row copied, so tables never share rows and any of them may be kept.
+
+use crate::core::netaddr::{Addr, AddrKind, Endpoint};
+use crate::core::ident::Key;
+use crate::core::list::{List, Values, Copy};
+use crate::core::text::Utf8;
+use crate::core::units::Bytes;
+
+/** The transport of a socket. */
+pub enum Proto : i32 {
+    /** A connection. */
+    Tcp = 0,
+
+    /** A datagram socket: open, with no peer the system will name. */
+    Udp = 1,
+
+    /** Its name: "tcp", "udp". */
+    pub fn label(self) : string {
+        return self == Proto::Tcp ? "tcp" : "udp";
+    }
+}
+
+/** Where a TCP connection stands. A UDP socket is `None`. */
+pub enum TcpState : i32 {
+    /** Not a connection: a UDP socket, open. */
+    Open = 0,
+    Closed = 1,
+    Listen = 2,
+    SynSent = 3,
+    SynReceived = 4,
+    Established = 5,
+    FinWait1 = 6,
+    FinWait2 = 7,
+    CloseWait = 8,
+    Closing = 9,
+    LastAck = 10,
+    TimeWait = 11,
+    DeleteTcb = 12,
+
+    /** The state Windows numbers `n` (`MIB_TCP_STATE_*`); `Open` for any other number. */
+    pub static fn fromWindows(n : i32) : TcpState {
+        return match n {
+            1 => TcpState::Closed,
+            2 => TcpState::Listen,
+            3 => TcpState::SynSent,
+            4 => TcpState::SynReceived,
+            5 => TcpState::Established,
+            6 => TcpState::FinWait1,
+            7 => TcpState::FinWait2,
+            8 => TcpState::CloseWait,
+            9 => TcpState::Closing,
+            10 => TcpState::LastAck,
+            11 => TcpState::TimeWait,
+            12 => TcpState::DeleteTcb,
+            _ => TcpState::Open,
+        };
+    }
+
+    /** The state `/proc/net/tcp` numbers `n` (its `st` column, hexadecimal there). */
+    pub static fn fromLinux(n : i32) : TcpState {
+        return match n {
+            1 => TcpState::Established,
+            2 => TcpState::SynSent,
+            3 => TcpState::SynReceived,
+            4 => TcpState::FinWait1,
+            5 => TcpState::FinWait2,
+            6 => TcpState::TimeWait,
+            7 => TcpState::Closed,
+            8 => TcpState::CloseWait,
+            9 => TcpState::LastAck,
+            10 => TcpState::Listen,
+            11 => TcpState::Closing,
+            _ => TcpState::Open,
+        };
+    }
+
+    /** Its name in a sentence: "established", "time wait". */
+    pub fn label(self) : string {
+        return match self {
+            TcpState::Open => "open",
+            TcpState::Closed => "closed",
+            TcpState::Listen => "listening",
+            TcpState::SynSent => "opening",
+            TcpState::SynReceived => "accepting",
+            TcpState::Established => "established",
+            TcpState::FinWait1 => "closing",
+            TcpState::FinWait2 => "closing",
+            TcpState::CloseWait => "close wait",
+            TcpState::Closing => "closing",
+            TcpState::LastAck => "last ack",
+            TcpState::TimeWait => "time wait",
+            TcpState::DeleteTcb => "deleting",
+        };
+    }
+
+    /** Whether a conversation is going on: established, or being opened. */
+    pub fn isLive(self) : bool {
+        return self == TcpState::Established || self == TcpState::SynSent || self == TcpState::SynReceived;
+    }
+}
+
+/** One socket. */
+pub class SocketInfo : Copy<SocketInfo> {
+    /** TCP or UDP. */
+    pub proto  : Proto;
+
+    /** This end. A socket bound to every address has the unspecified address here. */
+    pub local  : Endpoint;
+
+    /** The peer; empty (`isEmpty()`) for a listening TCP socket and for UDP, where the system names none. */
+    pub remote : Endpoint;
+
+    /** Where it stands; `Open` for UDP. */
+    pub state  : TcpState;
+
+    /**
+     * The id of the process that owns it, or -1 when the system did not say (a process the caller may not
+     * look into).
+     */
+    pub pid    : i64;
+
+    /** The same for the same flow across readings, whoever owns it and whatever its state. */
+    pub key    : i64;
+
+    /** A socket read as `proto` between `local` and `remote`, `state`, owned by `pid`. */
+    constructor(
+        proto : Proto,
+        own local : Endpoint,
+        own remote : Endpoint,
+        state : TcpState,
+        pid : i64
+    ) {
+        self.key = Key::step(
+            Key::step(Key::step(Key::seed(), proto as i64), local.key()),
+            remote.key()
+        );
+        self.proto = proto;
+        self.local = local;
+        self.remote = remote;
+        self.state = state;
+        self.pid = pid;
+    }
+
+    /** Whether it waits for connections. */
+    pub fn isListening(self) : bool {
+        return self.proto == Proto::Tcp && self.state == TcpState::Listen;
+    }
+
+    /** Whether the owner is known. */
+    pub fn hasOwner(self) : bool {
+        return self.pid >= 0;
+    }
+
+    /** Whether the peer is outside this machine and its own network. */
+    pub fn isExternal(self) : bool {
+        return !self.remote.isEmpty() && self.remote.addr.kind() == AddrKind::Public;
+    }
+
+    /** One line: "tcp 10.0.0.2:51234 → 20.1.2.3:443 established (pid 4120)". */
+    pub fn describe(self) : string {
+        let mut s : string = self.proto.label() + " " + self.local.text();
+        if (!self.remote.isEmpty()) {
+            s = s + " → " + self.remote.text();
+        }
+        s = s + " " + self.state.label();
+        if (self.pid >= 0) {
+            s = s + " (pid " + self.pid.toString() + ")";
+        }
+        return s;
+    }
+
+    /** A separate object with the same reading. */
+    pub fn copy(self) : SocketInfo {
+        return new SocketInfo(
+            self.proto,
+            self.local.copy(),
+            self.remote.copy(),
+            self.state,
+            self.pid
+        );
+    }
+}
+
+/** A set of sockets, in the order they were read. */
+pub class SocketTable {
+    rows : List<SocketInfo>;
+
+    /** An empty table. */
+    constructor() {
+        self.rows = new List<SocketInfo>();
+    }
+
+    /** Add a copy of `row` at the end. */
+    pub fn add(mut self, row : SocketInfo) : void {
+        self.rows.add(row.copy());
+    }
+
+    /** How many sockets there are. */
+    pub fn size(self) : i32 {
+        return self.rows.size();
+    }
+
+    /** The socket at position `i`. */
+    pub fn at(self, i : i32) : SocketInfo {
+        return self.rows.at(i);
+    }
+
+    /** Say that process `pid` owns the socket at position `i`. */
+    pub fn setOwner(mut self, i : i32, pid : i64) : void {
+        let r : SocketInfo = self.rows.at(i);
+        self.rows.set(i, new SocketInfo(r.proto, r.local.copy(), r.remote.copy(), r.state, pid));
+    }
+
+    /** A new table of the rows `keep` accepts. */
+    fn where(self, keep : (SocketInfo) => bool) : SocketTable {
+        let result : SocketTable = new SocketTable();
+        for (i of 0..self.size()) {
+            if (keep(self.at(i))) {
+                result.add(self.at(i));
+            }
+        }
+        return result;
+    }
+
+    /** The sockets of one transport. */
+    pub fn ofProto(self, proto : Proto) : SocketTable {
+        let want : i32 = proto as i32;
+        return self.where((s: SocketInfo) => (s.proto as i32) == want);
+    }
+
+    /** The TCP sockets that wait for connections. */
+    pub fn listening(self) : SocketTable {
+        return self.where((s: SocketInfo) => s.isListening());
+    }
+
+    /** The sockets in `state`. */
+    pub fn inState(self, state : TcpState) : SocketTable {
+        let want : i32 = state as i32;
+        return self.where((s: SocketInfo) => (s.state as i32) == want);
+    }
+
+    /** The sockets a process owns. */
+    pub fn ofPid(self, pid : i64) : SocketTable {
+        return self.where((s: SocketInfo) => s.pid == pid);
+    }
+
+    /** The sockets bound to local port `port`. */
+    pub fn onPort(self, port : i32) : SocketTable {
+        return self.where((s: SocketInfo) => s.local.port == port);
+    }
+
+    /** The sockets whose peer is `addr`. */
+    pub fn peerIs(self, addr : Addr) : SocketTable {
+        let result : SocketTable = new SocketTable();
+        for (i of 0..self.size()) {
+            if (!self.at(i).remote.isEmpty() && self.at(i).remote.addr.equals(addr)) {
+                result.add(self.at(i));
+            }
+        }
+        return result;
+    }
+
+    /** The sockets whose peer is outside this machine and its network. */
+    pub fn external(self) : SocketTable {
+        return self.where((s: SocketInfo) => s.isExternal());
+    }
+
+    /** How many have no known owner. */
+    pub fn unowned(self) : i32 {
+        let mut n : i32 = 0;
+        for (i of 0..self.size()) {
+            if (!self.at(i).hasOwner()) {
+                n = n + 1;
+            }
+        }
+        return n;
+    }
+
+    /** The ids of the owners, each once, in the order first met. */
+    pub fn owners(self) : i64[] {
+        let seen : Values<i64> = new Values<i64>();
+        for (i of 0..self.size()) {
+            let pid : i64 = self.at(i).pid;
+            let mut known : bool = pid < 0;
+            for (k of 0..seen.size()) {
+                if (seen.at(k) == pid) {
+                    known = true;
+                }
+            }
+            if (!known) {
+                seen.add(pid);
+            }
+        }
+        return seen.toArray();
+    }
+}
+
+/** What kind of link an interface is. */
+pub enum IfaceKind : i32 {
+    Ethernet = 0,
+    Wifi = 1,
+    Loopback = 2,
+
+    /** A virtual link: VPN, tunnel, bridge, container network. */
+    Virtual = 3,
+    Other = 4,
+
+    /** Its name: "ethernet", "wi-fi". */
+    pub fn label(self) : string {
+        return match self {
+            IfaceKind::Ethernet => "ethernet",
+            IfaceKind::Wifi => "wi-fi",
+            IfaceKind::Loopback => "loopback",
+            IfaceKind::Virtual => "virtual",
+            IfaceKind::Other => "other",
+        };
+    }
+}
+
+/** What the system says of a link, as `IfaceInfo::link` takes it. */
+pub struct LinkInfo {
+    /** The hardware address as "aa:bb:cc:dd:ee:ff", or empty. */
+    pub mac      : string = "";
+    pub kind     : IfaceKind = IfaceKind::Other;
+    pub up       : bool = false;
+
+    /** The largest packet it carries, 0 when not known. */
+    pub mtu      : i32 = 0;
+
+    /** Its speed in bits per second, 0 when not known. */
+    pub speedBps : i64 = 0;
+}
+
+/** An address held on a network of `prefix` bits. */
+class Subnet : Copy<Subnet> {
+    pub(file) addr   : Addr;
+    pub(file) prefix : i32;
+
+    constructor(own addr : Addr, prefix : i32) {
+        self.addr = addr;
+        self.prefix = prefix;
+    }
+    pub fn copy(self) : Subnet {
+        return new Subnet(self.addr.copy(), self.prefix);
+    }
+}
+
+/** A network interface, with the addresses it holds. */
+pub class IfaceInfo : Copy<IfaceInfo> {
+    /** The system's number for it. */
+    pub index    : i32;
+
+    /** The system's name: "eth0", or a GUID on Windows. */
+    pub name     : string;
+
+    /**
+     * What a person calls it: "Ethernet", "Wi-Fi". Equal to `name` where the system has no friendlier word.
+     */
+    pub label    : string;
+
+    /** The hardware address as "aa:bb:cc:dd:ee:ff", or empty. */
+    pub mac      : string = "";
+
+    /** What kind of link it is. */
+    pub kind     : IfaceKind = IfaceKind::Other;
+
+    /** Whether it is up and has a link. */
+    pub up       : bool = false;
+
+    /** The largest packet it carries, 0 when not known. */
+    pub mtu      : i32 = 0;
+
+    /** Its speed in bits per second, 0 when not known. */
+    pub speedBps : i64 = 0;
+
+    /** Bytes received since it came up. */
+    pub rxBytes  : i64 = 0;
+
+    /** Bytes sent since it came up. */
+    pub txBytes  : i64 = 0;
+
+    /** The same for the same interface across readings. */
+    pub key      : i64;
+    addrs        : List<Subnet>;
+
+    /** An interface the system numbers `index` and names `name`, which a person calls `label`. */
+    constructor(index : i32, name : string, label : string) {
+        self.index = index;
+        self.name = name;
+        self.label = label;
+        self.key = Key::scoped("iface", Key::ofText(name));
+        self.addrs = new List<Subnet>();
+    }
+
+    /** A separate object with the same reading. */
+    pub fn copy(self) : IfaceInfo {
+        let twin : IfaceInfo = new IfaceInfo(self.index, self.name, self.label);
+        twin.link(
+            LinkInfo {
+                mac: self.mac,
+                kind: self.kind,
+                up: self.up,
+                mtu: self.mtu,
+                speedBps: self.speedBps,
+            }
+        );
+        twin.traffic(self.rxBytes, self.txBytes);
+        for (i of 0..self.addressCount()) {
+            twin.addAddress(self.addrAt(i), self.prefixAt(i));
+        }
+        return twin;
+    }
+
+    /** One line: "Ethernet (ethernet, up) 192.168.1.20 rx 4.1 GiB tx 449.0 MiB". */
+    pub fn describe(self) : string {
+        let state : string = self.label + " (" + self.kind.label() + ", " + (self.up ? "up" : "down") + ")";
+        let traffic : string = "rx " + Bytes::human(
+            self.rxBytes
+        ) + " tx " + Bytes::human(self.txBytes);
+        return state + " " + self.firstV4().text() + " " + traffic;
+    }
+
+    /** Say what the link is. */
+    pub fn link(mut self, info : LinkInfo) : void {
+        self.mac = info.mac;
+        self.kind = info.kind;
+        self.up = info.up;
+        self.mtu = info.mtu;
+        self.speedBps = info.speedBps;
+    }
+
+    /** Say how much has gone through it. */
+    pub fn traffic(mut self, rxBytes : i64, txBytes : i64) : void {
+        self.rxBytes = rxBytes;
+        self.txBytes = txBytes;
+    }
+
+    /** Give it the address `addr` on a network of `prefix` bits. */
+    pub fn addAddress(mut self, addr : Addr, prefix : i32) : void {
+        self.addrs.add(new Subnet(addr.copy(), prefix));
+    }
+
+    /** How many addresses it holds. */
+    pub fn addressCount(self) : i32 {
+        return self.addrs.size();
+    }
+
+    /** The address at position `i`. */
+    pub fn addrAt(self, i : i32) : Addr {
+        return self.addrs.at(i).addr;
+    }
+
+    /** The prefix length of the address at position `i`. */
+    pub fn prefixAt(self, i : i32) : i32 {
+        return self.addrs.at(i).prefix;
+    }
+
+    /** Its first IPv4 address, or 0.0.0.0 when it has none. */
+    pub fn firstV4(self) : Addr {
+        for (i of 0..self.addressCount()) {
+            if (self.addrAt(i).isV4()) {
+                return self.addrAt(i).copy();
+            }
+        }
+        return Addr::none();
+    }
+
+    /** Whether `addr` is one of its addresses. */
+    pub fn holds(self, addr : Addr) : bool {
+        for (i of 0..self.addressCount()) {
+            if (self.addrAt(i).equals(addr)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Whether `addr` lies in the network of one of its addresses. */
+    pub fn reaches(self, addr : Addr) : bool {
+        for (i of 0..self.addressCount()) {
+            let mine : Addr = self.addrAt(i);
+            if (mine.family == addr.family && addr.inSubnet(mine, self.prefixAt(i))) {
+                return true;
+            }
+        }
+        return false;
+    }
+}
+
+/** One line of the routing table. */
+pub class RouteInfo : Copy<RouteInfo> {
+    /** The network. */
+    pub dest    : Addr;
+
+    /** How many bits of `dest` count: 0 for the default route. */
+    pub prefix  : i32;
+
+    /** Where to send what matches; unspecified when the network is on the link itself. */
+    pub gateway : Addr;
+
+    /** The interface it leaves by, by the system's number and name. */
+    pub ifIndex : i32;
+    pub ifName  : string;
+
+    /** The cost: the lowest wins among routes of the same length. */
+    pub metric  : i32;
+
+    /**
+     * A route to `dest`/`prefix` via `gateway`, leaving by interface `ifIndex` (`ifName`), costing `metric`.
+     */
+    constructor(
+        own dest : Addr,
+        prefix : i32,
+        own gateway : Addr,
+        ifIndex : i32,
+        ifName : string,
+        metric : i32
+    ) {
+        self.dest = dest;
+        self.prefix = prefix;
+        self.gateway = gateway;
+        self.ifIndex = ifIndex;
+        self.ifName = ifName;
+        self.metric = metric;
+    }
+
+    /** A separate object with the same reading. */
+    pub fn copy(self) : RouteInfo {
+        return new RouteInfo(
+            self.dest.copy(),
+            self.prefix,
+            self.gateway.copy(),
+            self.ifIndex,
+            self.ifName,
+            self.metric
+        );
+    }
+
+    /** Whether it is the route used when nothing more specific matches. */
+    pub fn isDefault(self) : bool {
+        return self.prefix == 0 && self.dest.isUnspecified();
+    }
+
+    /** Whether the network is directly on the interface, with no gateway. */
+    pub fn onLink(self) : bool {
+        return self.gateway.isUnspecified();
+    }
+
+    /** Whether it applies to `addr`. */
+    pub fn covers(self, addr : Addr) : bool {
+        return addr.family == self.dest.family && addr.inSubnet(self.dest, self.prefix);
+    }
+
+    /** One line: "default via 192.168.1.1 dev eth0 metric 100". */
+    pub fn describe(self) : string {
+        let target : string = self.isDefault() ? "default" : self.dest.text() + "/" + self.prefix.toString();
+        let via : string = self.onLink() ? "" : " via " + self.gateway.text();
+        return target + via + " dev " + self.ifName + " metric " + self.metric.toString();
+    }
+}
+
+/** The routing table. */
+pub class RouteTable {
+    rows : List<RouteInfo>;
+
+    /** An empty table. */
+    constructor() {
+        self.rows = new List<RouteInfo>();
+    }
+
+    /** Add a copy of `route` at the end. */
+    pub fn add(mut self, route : RouteInfo) : void {
+        self.rows.add(route.copy());
+    }
+
+    /** How many routes there are. */
+    pub fn size(self) : i32 {
+        return self.rows.size();
+    }
+
+    /** The route at position `i`. */
+    pub fn at(self, i : i32) : RouteInfo {
+        return self.rows.at(i);
+    }
+
+    /**
+     * The position of the route the system would use for `addr`: the longest prefix that covers it, the
+     * lowest metric among equals; -1 when none does.
+     */
+    pub fn indexFor(self, addr : Addr) : i32 {
+        let mut best : i32 = -1;
+        for (i of 0..self.size()) {
+            let r : RouteInfo = self.at(i);
+            if (r.covers(addr)) {
+                if (best < 0) {
+                    best = i;
+                } else {
+                    let b : RouteInfo = self.at(best);
+                    if (r.prefix > b.prefix || (r.prefix == b.prefix && r.metric < b.metric)) {
+                        best = i;
+                    }
+                }
+            }
+        }
+        return best;
+    }
+
+    /** Whether any route covers `addr`. */
+    pub fn reaches(self, addr : Addr) : bool {
+        return self.indexFor(addr) >= 0;
+    }
+
+    /**
+     * The position of the default route of `family` (4 or 6) with the lowest metric; -1 when there is none.
+     */
+    pub fn defaultIndex(self, family : i32) : i32 {
+        let mut best : i32 = -1;
+        for (i of 0..self.size()) {
+            let r : RouteInfo = self.at(i);
+            if (r.isDefault() && r.dest.family == family && (best < 0 || r.metric < self.at(
+                best
+            ).metric)) {
+                best = i;
+            }
+        }
+        return best;
+    }
+
+    /**
+     * The gateway of the default route of `family`, or the unspecified address when there is no default
+     * route.
+     */
+    pub fn defaultGateway(self, family : i32) : Addr {
+        let i : i32 = self.defaultIndex(family);
+        return i < 0 ? Addr::none() : self.at(i).gateway.copy();
+    }
+}
+
+/** A list of interfaces. */
+pub class IfaceTable {
+    rows : List<IfaceInfo>;
+
+    /** An empty list. */
+    constructor() {
+        self.rows = new List<IfaceInfo>();
+    }
+
+    /** Add `iface` at the end; the table takes it over. */
+    pub fn add(mut self, own iface : IfaceInfo) : void {
+        self.rows.add(iface);
+    }
+
+    /** How many interfaces there are. */
+    pub fn size(self) : i32 {
+        return self.rows.size();
+    }
+
+    /** The interface at position `i`. */
+    pub fn at(self, i : i32) : IfaceInfo {
+        return self.rows.at(i);
+    }
+
+    /**
+     * The position of the interface called `name` (the system's name or a person's, capitals not told apart),
+     * or -1.
+     */
+    pub fn find(self, name : string) : i32 {
+        for (i of 0..self.size()) {
+            if (Utf8::sameFolded(
+                self.at(i).name,
+                name
+            ) || Utf8::sameFolded(self.at(i).label, name)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** The position of the interface the system numbers `index`, or -1. */
+    pub fn byIndex(self, index : i32) : i32 {
+        for (i of 0..self.size()) {
+            if (self.at(i).index == index) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** The position of the interface that holds `addr` as one of its addresses, or -1. */
+    pub fn holding(self, addr : Addr) : i32 {
+        for (i of 0..self.size()) {
+            if (self.at(i).holds(addr)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** How many are up and are not the loopback. */
+    pub fn upCount(self) : i32 {
+        let mut n : i32 = 0;
+        for (i of 0..self.size()) {
+            if (self.at(i).up && self.at(i).kind != IfaceKind::Loopback) {
+                n = n + 1;
+            }
+        }
+        return n;
+    }
+}

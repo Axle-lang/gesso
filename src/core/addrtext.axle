@@ -1,0 +1,183 @@
+// addrtext — reading an internet address from the text people write it in.
+//
+// Dotted IPv4 ("192.168.1.20") and IPv6 in any of its written forms: groups of one to four hexadecimal
+// digits, one run of zero groups shortened to `::`, and an IPv4 address in dotted form as the last two
+// groups ("::ffff:10.0.0.1"). Text that is none of these is `Invalid`, naming the text.
+
+use crate::core::error::Invalid;
+use crate::core::list::Values;
+use crate::core::netaddr::Addr;
+use crate::core::scan::Scan;
+use crate::core::text::Utf8;
+
+/** `:` and `.`. */
+const COLON : i32 = 58;
+const DOT : i32 = 46;
+
+/** The groups of an IPv6 address as they are read: those before a `::` and those after it. */
+class V6Groups {
+    head : Values<i32>;
+    tail : Values<i32>;
+    sawGap : bool = false;
+
+    /** No group read yet. */
+    constructor() {
+        self.head = new Values<i32>();
+        self.tail = new Values<i32>();
+    }
+
+    /** How many groups have been read. */
+    pub(file) fn count(self) : i32 {
+        return self.head.size() + self.tail.size();
+    }
+
+    /** Whether a `::` has been met. */
+    pub(file) fn hasGap(self) : bool {
+        return self.sawGap;
+    }
+
+    /** Note that a `::` has been met. */
+    pub(file) fn markGap(mut self) : void {
+        self.sawGap = true;
+    }
+
+    /** Take `word` as the next group, after the `::` if one has been met. */
+    pub(file) fn push(mut self, word : i32) : void {
+        let group : i32 = word;
+        if (self.sawGap) {
+            self.tail.add(group);
+        } else {
+            self.head.add(group);
+        }
+    }
+
+    /** The eight groups, with the gap filled with zeros; `s` is the text, for the error. */
+    pub(file) fn addr(self, s : string) : Addr ! Invalid {
+        let total : i32 = self.count();
+        if ((self.sawGap && total > 7) || (!self.sawGap && total != 8)) {
+            throw Invalid("net.parse", s, "wrong number of groups");
+        }
+        let mut words : i32[] = malloc<i32>(8 as i64);
+        for (k of 0..8) {
+            words[k as i64] = 0;
+        }
+        for (k of 0..self.head.size()) {
+            words[k as i64] = self.head.at(k);
+        }
+        for (k of 0..self.tail.size()) {
+            words[(8 - self.tail.size() + k) as i64] = self.tail.at(k);
+        }
+        return Addr::fromGroups(words);
+    }
+}
+
+/** Addresses read from text. */
+pub class AddrText {
+    /**
+     * The number in bytes `a` .. `b` of `s` if they are all decimal digits (at most three) and at most 255,
+     * else -1.
+     */
+    static fn octet(s : string, a : i64, b : i64) : i32 {
+        if (b - a > 3) {
+            return -1;
+        }
+        let v : i64 = Scan::dec(s, a, b);
+        return v > 255 ? -1 : v as i32;
+    }
+
+    /** The hexadecimal number of one to four digits in bytes `a` .. `b` of `s`, else -1. */
+    static fn group(s : string, a : i64, b : i64) : i32 {
+        return b - a > 4 ? -1 : Scan::hex(s, a, b) as i32;
+    }
+
+    /** Read dotted IPv4 text. */
+    pub static fn parseV4(s : string) : Addr ! Invalid {
+        let mut parts : i32 = 0;
+        let mut n : i64 = 0;
+        let mut start : i64 = 0;
+        for (i of 0..s.byteLength + 1) {
+            if (i != s.byteLength && s.byteAt(i) != DOT) {
+                continue;
+            }
+            let v : i32 = AddrText::octet(s, start, i);
+            if (v < 0 || parts == 4) {
+                throw Invalid("net.parse", s, "not an IPv4 address");
+            }
+            n = (n << 8) | (v as i64);
+            parts = parts + 1;
+            start = i + 1;
+        }
+        if (parts != 4) {
+            throw Invalid("net.parse", s, "not an IPv4 address");
+        }
+        return Addr::v4n(n);
+    }
+
+    /** Read IPv6 text, with `::` and an optional dotted IPv4 tail. */
+    pub static fn parseV6(s : string) : Addr ! Invalid {
+        if (s.byteLength < 2 || (s.byteAt(0) == COLON && s.byteAt(1) != COLON)) {
+            throw Invalid("net.parse", s, "not an IPv6 address");
+        }
+        let mut groups : V6Groups = new V6Groups();
+        let mut i : i64 = 0;
+        while (i < s.byteLength) {
+            if (s.byteAt(i) == COLON) {
+                i = AddrText::readSeparator(s, i, groups);
+            } else {
+                i = AddrText::readGroup(s, i, groups);
+            }
+        }
+        return groups.addr(s);
+    }
+
+    /** Read the `:` or `::` at byte `i`; the offset after it. */
+    static fn readSeparator(s : string, i : i64, groups : V6Groups) : i64 ! Invalid {
+        let doubled : bool = i + 1 < s.byteLength && s.byteAt(i + 1) == COLON;
+        if (doubled) {
+            if (groups.hasGap()) {
+                throw Invalid("net.parse", s, "two `::` in one address");
+            }
+            groups.markGap();
+            return i + 2;
+        }
+        if (i + 1 == s.byteLength) {
+            throw Invalid("net.parse", s, "ends with a lone `:`");
+        }
+        return i + 1;
+    }
+
+    /** Read the group, or the dotted IPv4 tail, that starts at byte `i`; the offset after it. */
+    static fn readGroup(s : string, i : i64, groups : V6Groups) : i64 ! Invalid {
+        let end : i64 = AddrText::groupEnd(s, i);
+        let dotted : bool = Scan::indexOf(s, DOT, i, end) >= 0;
+        if (dotted && end != s.byteLength) {
+            throw Invalid("net.parse", s, "the dotted tail must come last");
+        }
+        if (groups.count() + (dotted ? 2 : 1) > 8) {
+            throw Invalid("net.parse", s, "not an IPv6 address");
+        }
+        if (dotted) {
+            let v4 : Addr = AddrText::parseV4(Utf8::slice(s, i, end));
+            groups.push((v4.byteAt(0) << 8) | v4.byteAt(1));
+            groups.push((v4.byteAt(2) << 8) | v4.byteAt(3));
+            return end;
+        }
+        let word : i32 = AddrText::group(s, i, end);
+        if (word < 0) {
+            throw Invalid("net.parse", s, "not an IPv6 address");
+        }
+        groups.push(word);
+        return end;
+    }
+
+    /** Where the group that starts at byte `i` ends: at the next `:` or the end of the text. */
+    static fn groupEnd(s : string, i : i64) : i64 {
+        let colon : i64 = Scan::indexOf(s, COLON, i, s.byteLength);
+        return colon < 0 ? s.byteLength : colon;
+    }
+
+    /** Read an address from text: dotted IPv4, or IPv6 in any of its written forms. */
+    pub static fn parse(s : string) : Addr ! Invalid {
+        return Scan::indexOf(s, COLON, 0, s.byteLength) >= 0 ? AddrText::parseV6(s) : AddrText::parseV4(s);
+    }
+}

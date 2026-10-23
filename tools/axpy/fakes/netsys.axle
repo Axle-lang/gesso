@@ -1,0 +1,90 @@
+// fakes/netsys — the `sys::netsys` seam as the tests see it: a small fixed network.
+//
+// The same public shape as the two ports. The machine has a loopback and an Ethernet adapter at
+// 192.168.1.20/24 behind a gateway at 192.168.1.1, a Wi-Fi adapter that is down, and four sockets.
+
+use crate::core::error::SysError;
+use crate::core::netaddr::{Addr, Endpoint};
+use crate::core::netinfo::{
+    Proto, TcpState, SocketInfo, SocketTable, IfaceInfo, IfaceTable, IfaceKind, RouteInfo, RouteTable,
+    LinkInfo,
+};
+
+/** A network that is always the same. */
+pub class NetSys {
+    pub static fn sockets() : SocketTable ! SysError {
+        let t : SocketTable = new SocketTable();
+        t.add(
+            new SocketInfo(
+                Proto::Tcp,
+                new Endpoint(Addr::parse("0.0.0.0"), 443),
+                Endpoint::none(),
+                TcpState::Listen,
+                4
+            )
+        );
+        t.add(
+            new SocketInfo(
+                Proto::Tcp,
+                new Endpoint(Addr::parse("192.168.1.20"), 51000),
+                new Endpoint(Addr::parse("93.184.216.34"), 443),
+                TcpState::Established,
+                4120
+            )
+        );
+        t.add(
+            new SocketInfo(
+                Proto::Tcp,
+                new Endpoint(Addr::parse("192.168.1.20"), 51001),
+                new Endpoint(Addr::parse("192.168.1.5"), 445),
+                TcpState::Established,
+                4120
+            )
+        );
+        t.add(
+            new SocketInfo(
+                Proto::Udp,
+                new Endpoint(Addr::parse("0.0.0.0"), 5353),
+                Endpoint::none(),
+                TcpState::Open,
+                -1
+            )
+        );
+        return t;
+    }
+    pub static fn interfaces() : IfaceTable ! SysError {
+        let t : IfaceTable = new IfaceTable();
+        let lo : IfaceInfo = new IfaceInfo(1, "lo", "Loopback");
+        lo.link(LinkInfo { kind: IfaceKind::Loopback, up: true, mtu: 65536 });
+        lo.traffic(5000, 5000);
+        lo.addAddress(Addr::parse("127.0.0.1"), 8);
+        lo.addAddress(Addr::parse("::1"), 128);
+        t.add(lo);
+        let eth : IfaceInfo = new IfaceInfo(2, "eth0", "Ethernet");
+        eth.link(
+            LinkInfo {
+                mac: "aa:bb:cc:dd:ee:ff",
+                kind: IfaceKind::Ethernet,
+                up: true,
+                mtu: 1500,
+                speedBps: 1000000000,
+            }
+        );
+        eth.traffic(1000000, 250000);
+        eth.addAddress(Addr::parse("192.168.1.20"), 24);
+        eth.addAddress(Addr::parse("fe80::a8bb:ccff:fedd:eeff"), 64);
+        t.add(eth);
+        let wifi : IfaceInfo = new IfaceInfo(3, "wlan0", "Wi-Fi");
+        wifi.link(LinkInfo { mac: "11:22:33:44:55:66", kind: IfaceKind::Wifi, mtu: 1500 });
+        wifi.traffic(77, 88);
+        t.add(wifi);
+        return t;
+    }
+    pub static fn routes() : RouteTable ! SysError {
+        let t : RouteTable = new RouteTable();
+        t.add(new RouteInfo(Addr::none(), 0, Addr::parse("192.168.1.1"), 2, "Ethernet", 100));
+        t.add(new RouteInfo(Addr::parse("192.168.1.0"), 24, Addr::none(), 2, "Ethernet", 100));
+        t.add(new RouteInfo(Addr::parse("127.0.0.0"), 8, Addr::none(), 1, "Loopback", 0));
+        return t;
+    }
+}

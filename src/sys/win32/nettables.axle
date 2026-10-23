@@ -1,0 +1,350 @@
+// sys/nettables — the IP helper's tables and adapter records, for the Windows network seam.
+
+use std::text::StringBuilder;
+use crate::core::error::{SysError, OsFailure};
+use crate::core::netaddr::{Addr, Endpoint};
+use crate::core::netinfo::{
+    Proto, TcpState, SocketInfo, SocketTable, IfaceInfo, IfaceTable, IfaceKind, LinkInfo, RouteInfo,
+    RouteTable,
+};
+use crate::core::netparse::NetText;
+use crate::sys::errno::{Errno, ERROR_INSUFFICIENT_BUFFER, ERROR_BUFFER_OVERFLOW};
+use crate::sys::iphlpapi::{
+    GetExtendedTcpTable, GetExtendedUdpTable, GetAdaptersAddresses, GetIfEntry2, GetIpForwardTable, FW_ROW,
+    FW_DEST, FW_MASK, FW_NEXTHOP, FW_IFINDEX, FW_METRIC, AF_UNSPEC, AF_INET, AF_INET6,
+    TCP_TABLE_OWNER_PID_ALL, UDP_TABLE_OWNER_PID, GAA_SKIP, TABLE_ROWS, TCP4_ROW, TCP4_STATE,
+    TCP4_LOCAL_ADDR, TCP4_LOCAL_PORT, TCP4_REMOTE_ADDR, TCP4_REMOTE_PORT, TCP4_PID, TCP6_ROW,
+    TCP6_LOCAL_ADDR, TCP6_LOCAL_PORT, TCP6_REMOTE_ADDR, TCP6_REMOTE_PORT, TCP6_STATE, TCP6_PID, UDP4_ROW,
+    UDP4_LOCAL_ADDR, UDP4_LOCAL_PORT, UDP4_PID, UDP6_ROW, UDP6_LOCAL_ADDR, UDP6_LOCAL_PORT, UDP6_PID,
+    AA_NEXT, AA_NAME, AA_UNICAST, AA_FRIENDLY, AA_MAC, AA_MAC_LEN, AA_MTU, AA_IFTYPE, AA_OPER, AA_INDEX,
+    AA_TX_SPEED, UA_NEXT, UA_SOCKADDR, UA_PREFIX, IF_ETHERNET, IF_WIFI, IF_LOOPBACK, IF_TUNNEL, IF_VIRTUAL,
+    IFROW2_SIZE, IFROW2_INDEX, IFROW2_IN_OCTETS, IFROW2_OUT_OCTETS,
+};
+use crate::raw::mem::Raw;
+use crate::raw::buf::Buf;
+use crate::raw::sockaddr::SockAddr;
+use crate::raw::wide::{Wide, Narrow};
+
+/** How many times a table is asked for again after the system says the buffer was short. */
+const NET_TRIES : i32 = 8;
+
+/** The most a `DWORD` can say: what `Mtu` holds when the adapter has none. */
+const NO_MTU : i64 = 4294967295;
+
+/** The fastest link believed: above it, the speed is a placeholder and reads as unknown. */
+const MAX_SPEED_BPS : i64 = 1000000000000;
+
+/** Where the fields of one kind of socket-table row lie. A field the table lacks is at -1. */
+pub struct RowLayout {
+    pub proto      : Proto = Proto::Tcp;
+    pub family     : i32 = 0;
+    pub size       : i64 = 0;
+    pub localAddr  : i64 = 0;
+    pub localPort  : i64 = 0;
+    pub remoteAddr : i64 = -1;
+    pub remotePort : i64 = -1;
+    pub state      : i64 = -1;
+    pub pid        : i64 = 0;
+}
+
+/** Reading the IP helper's tables and records. */
+pub class NetTables {
+    /** The rows of the IPv4 TCP table. */
+    static fn tcp4() : RowLayout {
+        return RowLayout {
+            proto: Proto::Tcp,
+            family: AF_INET,
+            size: TCP4_ROW,
+            localAddr: TCP4_LOCAL_ADDR,
+            localPort: TCP4_LOCAL_PORT,
+            remoteAddr: TCP4_REMOTE_ADDR,
+            remotePort: TCP4_REMOTE_PORT,
+            state: TCP4_STATE,
+            pid: TCP4_PID,
+        };
+    }
+
+    /** The rows of the IPv6 TCP table. */
+    static fn tcp6() : RowLayout {
+        return RowLayout {
+            proto: Proto::Tcp,
+            family: AF_INET6,
+            size: TCP6_ROW,
+            localAddr: TCP6_LOCAL_ADDR,
+            localPort: TCP6_LOCAL_PORT,
+            remoteAddr: TCP6_REMOTE_ADDR,
+            remotePort: TCP6_REMOTE_PORT,
+            state: TCP6_STATE,
+            pid: TCP6_PID,
+        };
+    }
+
+    /** The rows of the IPv4 UDP table. */
+    static fn udp4() : RowLayout {
+        return RowLayout {
+            proto: Proto::Udp,
+            family: AF_INET,
+            size: UDP4_ROW,
+            localAddr: UDP4_LOCAL_ADDR,
+            localPort: UDP4_LOCAL_PORT,
+            pid: UDP4_PID,
+        };
+    }
+
+    /** The rows of the IPv6 UDP table. */
+    static fn udp6() : RowLayout {
+        return RowLayout {
+            proto: Proto::Udp,
+            family: AF_INET6,
+            size: UDP6_ROW,
+            localAddr: UDP6_LOCAL_ADDR,
+            localPort: UDP6_LOCAL_PORT,
+            pid: UDP6_PID,
+        };
+    }
+
+    /** The four socket tables, in the order they are listed. */
+    static fn layouts() : RowLayout[] {
+        return [NetTables::tcp4(), NetTables::tcp6(), NetTables::udp4(), NetTables::udp6()];
+    }
+
+    /** The IPv4 address at `off` of `table`, bytes in network order. */
+    pub static fn v4At(table : Buf, off : i64) : Addr {
+        return SockAddr::v4(Raw::plus(table.ptr(), off));
+    }
+
+    /** The IPv6 address at `off` of `table`, bytes in network order. */
+    pub static fn v6At(table : Buf, off : i64) : Addr {
+        return SockAddr::v6(Raw::plus(table.ptr(), off));
+    }
+
+    /** A port as the tables store it: in the low word of a `DWORD`, most significant byte first. */
+    static fn portAt(table : Buf, off : i64) : i32 {
+        return (table.u8At(off) << 8) | table.u8At(off + 1);
+    }
+
+    /** The endpoint of an address and a port in a row; empty when the row has no such field. */
+    static fn endpointAt(table : Buf, row : i64, addr : i64, port : i64, family : i32) : Endpoint {
+        if (addr < 0) {
+            return Endpoint::none();
+        }
+        let address : Addr = family == AF_INET ? NetTables::v4At(
+            table,
+            row + addr
+        ) : NetTables::v6At(table, row + addr);
+        return new Endpoint(address, NetTables::portAt(table, row + port));
+    }
+
+    /** The socket in row `r` of `table`, laid out as `layout` says. */
+    static fn socketAt(table : Buf, layout : RowLayout, r : i32) : SocketInfo {
+        let row : i64 = TABLE_ROWS + (r as i64) * layout.size;
+        let state : TcpState = layout.state < 0 ? TcpState::Open : TcpState::fromWindows(
+            table.i32At(row + layout.state)
+        );
+        return new SocketInfo(
+            layout.proto,
+            NetTables::endpointAt(table, row, layout.localAddr, layout.localPort, layout.family),
+            NetTables::endpointAt(table, row, layout.remoteAddr, layout.remotePort, layout.family),
+            state,
+            table.u32At(row + layout.pid)
+        );
+    }
+
+    /**
+     * Read one socket table into `table`, growing it while the system says it was short. Returns false when
+     * the family has no such table.
+     */
+    static fn fetch(table : Buf, layout : RowLayout) : bool ! SysError {
+        let tcp : bool = layout.proto == Proto::Tcp;
+        let size : Buf = new Buf(4);
+        for (attempt of 0..NET_TRIES) {
+            size.putI32(0, table.size() as i32);
+            let rc : i32 = tcp ? GetExtendedTcpTable(
+                table.ptr(),
+                size.ptr(),
+                0,
+                layout.family,
+                TCP_TABLE_OWNER_PID_ALL,
+                0
+            ) : GetExtendedUdpTable(
+                table.ptr(),
+                size.ptr(),
+                0,
+                layout.family,
+                UDP_TABLE_OWNER_PID,
+                0
+            );
+            if (rc == 0) {
+                return true;
+            }
+            if (rc != ERROR_INSUFFICIENT_BUFFER) {
+                Errno::win32("net.sockets", tcp ? "the TCP table" : "the UDP table", rc);
+            }
+            table.fit(size.u32At(0) + 4096);
+        }
+        throw OsFailure("net.sockets", ERROR_INSUFFICIENT_BUFFER, "the table kept growing");
+    }
+
+    /** How many rows a table declares, held to what fits in the bytes. */
+    pub static fn rows(table : Buf, rowSize : i64) : i32 {
+        let n : i64 = table.u32At(0);
+        let fits : i64 = (table.size() - TABLE_ROWS) / rowSize;
+        return (n < fits ? n : fits) as i32;
+    }
+
+    /** Every TCP and UDP socket, with its owner. */
+    pub static fn sockets() : SocketTable ! SysError {
+        let out : SocketTable = new SocketTable();
+        let table : Buf = new Buf(262144);
+        let layouts : RowLayout[] = NetTables::layouts();
+        for (i of 0..layouts.length) {
+            if (NetTables::fetch(table, layouts[i])) {
+                for (r of 0..NetTables::rows(table, layouts[i].size)) {
+                    out.add(NetTables::socketAt(table, layouts[i], r));
+                }
+            }
+        }
+        return out;
+    }
+
+    /** "aa:bb:cc:dd:ee:ff" for the hardware address of the adapter record at `a`; empty when it has none. */
+    static fn macOf(a : ptr) : string {
+        let n : i32 = Raw::i32At(a, AA_MAC_LEN);
+        let digits : string = "0123456789abcdef";
+        let sb : StringBuilder = new StringBuilder();
+        for (i of 0..(n < 8 ? n : 8)) {
+            let b : i32 = Raw::u8At(a, AA_MAC + (i as i64));
+            if (i > 0) {
+                sb.appendChar(58);
+            }
+            sb.appendChar(digits.byteAt((b >> 4) as i64));
+            sb.appendChar(digits.byteAt((b & 15) as i64));
+        }
+        return sb.toString();
+    }
+
+    /** The kind of link the `IfType` number says. */
+    static fn kindOf(ifType : i32) : IfaceKind {
+        return match ifType {
+            IF_ETHERNET => IfaceKind::Ethernet,
+            IF_WIFI => IfaceKind::Wifi,
+            IF_LOOPBACK => IfaceKind::Loopback,
+            IF_TUNNEL | IF_VIRTUAL => IfaceKind::Virtual,
+            _ => IfaceKind::Other,
+        };
+    }
+
+    /** The adapter records, as `GetAdaptersAddresses` writes them. */
+    static fn adapterList() : Buf ! SysError {
+        let list : Buf = new Buf(65536);
+        let size : Buf = new Buf(4);
+        let mut rc : i32 = ERROR_BUFFER_OVERFLOW;
+        for (attempt of 0..NET_TRIES) {
+            size.putI32(0, list.size() as i32);
+            rc = GetAdaptersAddresses(AF_UNSPEC, GAA_SKIP, Raw::nil(), list.ptr(), size.ptr());
+            if (rc != ERROR_BUFFER_OVERFLOW) {
+                break;
+            }
+            list.fit(size.u32At(0) + 4096);
+        }
+        if (rc != 0) {
+            Errno::win32("net.interfaces", "the adapter list", rc);
+        }
+        return list;
+    }
+
+    /** What the system says of the link of the adapter record at `a`. */
+    static fn linkOf(a : ptr) : LinkInfo {
+        let mtu : i64 = Raw::u32At(a, AA_MTU);
+        let speed : i64 = Raw::i64At(a, AA_TX_SPEED);
+        return LinkInfo {
+            mac: NetTables::macOf(a),
+            kind: NetTables::kindOf(Raw::i32At(a, AA_IFTYPE)),
+            up: Raw::i32At(a, AA_OPER) == 1,
+            mtu: mtu == NO_MTU ? 0 : mtu as i32,
+            speedBps: speed > 0 && speed < MAX_SPEED_BPS ? speed : 0,
+        };
+    }
+
+    /** The adapter whose record is at `a`, with its link, its byte counters and its unicast addresses. */
+    static fn adapterAt(a : ptr) : IfaceInfo {
+        let index : i32 = Raw::i32At(a, AA_INDEX);
+        let name : string = Narrow::read(Raw::ptrAt(a, AA_NAME), 256);
+        let iface : IfaceInfo = new IfaceInfo(
+            index,
+            name,
+            Wide::read(Raw::ptrAt(a, AA_FRIENDLY), 256)
+        );
+        iface.link(NetTables::linkOf(a));
+        let row : Buf = new Buf(IFROW2_SIZE);
+        row.putI32(IFROW2_INDEX, index);
+        if (GetIfEntry2(row.ptr()) == 0) {
+            iface.traffic(row.i64At(IFROW2_IN_OCTETS), row.i64At(IFROW2_OUT_OCTETS));
+        }
+        let mut u : ptr = Raw::ptrAt(a, AA_UNICAST);
+        while (!Raw::isNil(u)) {
+            let sa : ptr = Raw::ptrAt(u, UA_SOCKADDR);
+            if (!Raw::isNil(sa)) {
+                iface.addAddress(
+                    SockAddr::at(sa, Raw::u16At(sa, 0) == AF_INET6),
+                    Raw::u8At(u, UA_PREFIX)
+                );
+            }
+            u = Raw::ptrAt(u, UA_NEXT);
+        }
+        return iface;
+    }
+
+    /** Every network adapter, with its unicast addresses and its byte counters. */
+    pub static fn interfaces() : IfaceTable ! SysError {
+        let list : Buf = NetTables::adapterList();
+        let table : IfaceTable = new IfaceTable();
+        let mut a : ptr = list.ptr();
+        while (!Raw::isNil(a)) {
+            table.add(NetTables::adapterAt(a));
+            a = Raw::ptrAt(a, AA_NEXT);
+        }
+        return table;
+    }
+
+    /** The IPv4 routing table, as `GetIpForwardTable` writes it. */
+    pub static fn forwardTable() : Buf ! SysError {
+        let table : Buf = new Buf(65536);
+        let size : Buf = new Buf(4);
+        let mut rc : i32 = ERROR_INSUFFICIENT_BUFFER;
+        for (attempt of 0..NET_TRIES) {
+            size.putI32(0, table.size() as i32);
+            rc = GetIpForwardTable(table.ptr(), size.ptr(), 0);
+            if (rc != ERROR_INSUFFICIENT_BUFFER) {
+                break;
+            }
+            table.fit(size.u32At(0) + 4096);
+        }
+        if (rc != 0) {
+            Errno::win32("net.routes", "the routing table", rc);
+        }
+        return table;
+    }
+
+    /** The IPv4 routing table; each route is named after the adapter it leaves by. */
+    pub static fn routes(ifaces : IfaceTable) : RouteTable ! SysError {
+        let table : Buf = NetTables::forwardTable();
+        let out : RouteTable = new RouteTable();
+        for (r of 0..NetTables::rows(table, FW_ROW)) {
+            let row : i64 = TABLE_ROWS + (r as i64) * FW_ROW;
+            let index : i32 = table.i32At(row + FW_IFINDEX);
+            let at : i32 = ifaces.byIndex(index);
+            out.add(
+                new RouteInfo(
+                    NetTables::v4At(table, row + FW_DEST),
+                    NetText::prefixOf(NetTables::v4At(table, row + FW_MASK)),
+                    NetTables::v4At(table, row + FW_NEXTHOP),
+                    index,
+                    at < 0 ? "" : ifaces.at(at).label,
+                    table.i32At(row + FW_METRIC)
+                )
+            );
+        }
+        return out;
+    }
+}
