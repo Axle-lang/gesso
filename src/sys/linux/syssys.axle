@@ -1,0 +1,47 @@
+// sys/syssys — memory, processor time and power, on Linux: `/proc/meminfo`, `/proc/stat` and
+// `/sys/class/power_supply`.
+//
+// Each power supply is a folder. One whose `type` is `Battery` gives `capacity` (a percentage) and
+// `status`; one whose `type` is `Mains` gives `online`. Charge times are not read: the kernel offers
+// them as energy and power figures that differ between drivers, and a wrong estimate is worse than
+// none, so `minutesLeft` is -1 on Linux.
+
+use crate::core::scan::Scan;
+use crate::core::error::SysError;
+use crate::core::sysinfo::{MemText, CpuTimes, PowerInfo, BatteryState, Mains};
+use crate::sys::files::Files;
+
+/** Memory, processor time and power. */
+pub class SysSys {
+    /** Physical memory: all of it and what can be had without pushing anything out, in bytes. */
+    pub static fn memory() : (total: i64, available: i64) ! SysError {
+        return MemText::parse(Files::slurp("system.memory", "/proc/meminfo"));
+    }
+
+    /** The processor's tick counters, all cores together. */
+    pub static fn cpuTimes() : CpuTimes ! SysError {
+        return CpuTimes::parse(Files::slurp("system.cpu", "/proc/stat"));
+    }
+
+    /** The battery and the mains. */
+    pub static fn power() : PowerInfo ! SysError {
+        let names : string[] = Files::names("system.power", "/sys/class/power_supply");
+        let mut info : PowerInfo = PowerInfo { state: BatteryState::Absent };
+        let mut battery : bool = false;
+        for (i of 0..names.length) {
+            let base : string = "/sys/class/power_supply/" + names[i] + "/";
+            let kind : string = Scan::line(Files::tryRead(base + "type"));
+            if (kind == "Battery" && !battery) {
+                battery = true;
+                info.percent = Scan::number(Files::tryRead(base + "capacity")) as i32;
+                info.state = BatteryState::fromLinux(Scan::line(Files::tryRead(base + "status")));
+            } else if (kind == "Mains") {
+                let online : bool = Scan::number(Files::tryRead(base + "online")) == 1;
+                if (online || info.mains == Mains::Unknown) {
+                    info.mains = online ? Mains::Online : Mains::Offline;
+                }
+            }
+        }
+        return info;
+    }
+}

@@ -1,0 +1,61 @@
+// cpu — how busy the processor is, and the machine's power.
+//
+//     let cpu : CpuMeter = CpuMeter::start();
+//     loop { sleep(1000); cpu.update(); println(cpu.percent().toString() + "%"); }
+//
+//     let power : PowerInfo = Power::now();       // "78% · on battery"
+//
+// Load is the share of the time *since the last update* that the processor was not idle: ask once a
+// second and it is the last second's load. Right after `start` there is one reading and no interval yet,
+// so `ready()` is false until the first `update`.
+
+use crate::core::error::SysError;
+use crate::core::sysinfo::{CpuLoad, PowerInfo};
+use crate::sys::syssys::SysSys;
+
+/** A reading of processor load that is brought up to date on request. */
+pub class CpuMeter {
+    load : CpuLoad;
+
+    /** A meter with no reading; use `start`. */
+    constructor() {
+        self.load = new CpuLoad();
+    }
+
+    /** A meter with its first reading taken. */
+    pub static fn start() : CpuMeter ! SysError {
+        let m : CpuMeter = new CpuMeter();
+        m.load.feed(SysSys::cpuTimes());
+        return m;
+    }
+
+    /** Read the counters again and work out the load since the last reading. */
+    pub fn update(mut self) : void ! SysError {
+        self.load.feed(SysSys::cpuTimes());
+    }
+
+    /** Whether there is a load to tell: at least one update has been made. */
+    pub fn ready(self) : bool {
+        return self.load.ready();
+    }
+
+    /** The load since the previous update, in whole percent. */
+    pub fn percent(self) : i32 {
+        return self.load.percent();
+    }
+
+    /** The load since the previous update, in tenths of a percent (0 to 1000). */
+    pub fn tenths(self) : i64 {
+        return self.load.tenths();
+    }
+}
+
+/** The machine's power. */
+pub class Power {
+    /**
+     * The battery and the mains, as they stand now. A machine with no battery says so (`hasBattery()` false).
+     */
+    pub static fn now() : PowerInfo ! SysError {
+        return SysSys::power();
+    }
+}

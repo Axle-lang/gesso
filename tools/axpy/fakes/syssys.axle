@@ -1,0 +1,24 @@
+// fakes/syssys — the `sys::syssys` seam as the tests see it: a processor and a battery that are fixed.
+//
+// The same public shape as the two ports.
+
+use crate::core::error::SysError;
+use crate::core::sysinfo::{CpuTimes, PowerInfo, BatteryState, Mains};
+
+/** A machine whose counters advance by a fixed step each time they are read. */
+pub class SysSys {
+    pub static fn memory() : (total: i64, available: i64) ! SysError {
+        return (16000000000, 4000000000);
+    }
+    pub static fn cpuTimes() : CpuTimes ! SysError {
+        return new CpuTimes(1000, 2000);
+    }
+    pub static fn power() : PowerInfo ! SysError {
+        return PowerInfo {
+            state: BatteryState::Discharging,
+            percent: 78,
+            mains: Mains::Offline,
+            minutesLeft: 192,
+        };
+    }
+}

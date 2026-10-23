@@ -1,0 +1,211 @@
+// sysinfo — processor load and power, as readings and as the arithmetic between readings.
+//
+// The system counts processor time in ticks that only ever grow. Load is not in any one reading: it is
+// the share of the ticks *between* two readings that were not idle. `CpuLoad` holds the last reading
+// and gives the share since, in tenths of a percent so it stays an integer; the first reading has
+// nothing to compare with, and says so (`ready()` is false) instead of answering a made-up zero.
+
+use crate::core::scan::{Scan, Line, Field};
+
+/** Reading the memory the kernel reports. */
+pub class MemText {
+    /**
+     * The figures `/proc/meminfo` gives (`MemTotal:  16318828 kB`) in bytes: all memory and what is
+     * available. Both are -1 when the line is missing.
+     */
+    pub static fn parse(text : string) : (total: i64, available: i64) {
+        return (MemText::kib(text, "MemTotal:"), MemText::kib(text, "MemAvailable:"));
+    }
+
+    /** The bytes the line starting with `key` holds, or -1. */
+    static fn kib(text : string, key : string) : i64 {
+        let at : i64 = Scan::lineWith(text, key);
+        let kb : i64 = at < 0 ? -1 : Line::at(text, at).field(1).dec();
+        return kb < 0 ? -1 : kb * 1024;
+    }
+}
+
+/** The processor's tick counters at one moment, all cores together. */
+pub class CpuTimes {
+    /** Ticks spent idle. */
+    pub idle  : i64;
+
+    /** Ticks spent at all: idle and busy. */
+    pub total : i64;
+
+    /** Counters reading `idle` of `total`. */
+    constructor(idle : i64, total : i64) {
+        self.idle = idle;
+        self.total = total;
+    }
+
+    /**
+     * The counters in the first line of `/proc/stat` (`cpu  user nice system idle iowait irq softirq steal
+     * …`): idle counts idle and iowait. Both are -1 when the line is not there.
+     */
+    pub static fn parse(text : string) : CpuTimes {
+        let row : Line = Line::at(text, 0);
+        if (!row.field(0).equals("cpu")) {
+            return new CpuTimes(-1, -1);
+        }
+        let mut total : i64 = 0;
+        let mut idle : i64 = 0;
+        for (n of 1..9) {
+            let field : Field = row.field(n);
+            if (!field.present()) {
+                continue;
+            }
+            if (field.dec() < 0) {
+                return new CpuTimes(-1, -1);
+            }
+            total = total + field.dec();
+            if (n == 4 || n == 5) {
+                idle = idle + field.dec();
+            }
+        }
+        return new CpuTimes(idle, total);
+    }
+}
+
+/** Processor load between readings. */
+pub class CpuLoad {
+    last       : CpuTimes;
+    seen       : bool = false;
+    loadTenths : i64 = 0;
+    warm       : bool = false;
+
+    /** A meter that has seen nothing. */
+    constructor() {
+        self.last = new CpuTimes(0, 0);
+    }
+
+    /** Take a reading. */
+    pub fn feed(mut self, now : CpuTimes) : void {
+        if (now.total < 0) {
+            return;
+        }
+        if (self.seen) {
+            let total : i64 = now.total - self.last.total;
+            let idle : i64 = now.idle - self.last.idle;
+            if (total > 0 && idle >= 0 && idle <= total) {
+                self.loadTenths = ((total - idle) * 1000) / total;
+                self.warm = true;
+            }
+        }
+        self.last = new CpuTimes(now.idle, now.total);
+        self.seen = true;
+    }
+
+    /** Whether two readings have been taken, so that a load can be told. */
+    pub fn ready(self) : bool {
+        return self.warm;
+    }
+
+    /**
+     * The share of the time since the previous reading that was not idle, in tenths of a percent (0 to 1000);
+     * 0 until `ready`.
+     */
+    pub fn tenths(self) : i64 {
+        return self.loadTenths;
+    }
+
+    /** The same as a whole percent. */
+    pub fn percent(self) : i32 {
+        return ((self.loadTenths + 5) / 10) as i32;
+    }
+}
+
+/** How a battery stands. */
+pub enum BatteryState : i32 {
+    /** Cannot be told. */
+    Unknown = 0,
+    Charging = 1,
+    Discharging = 2,
+    Full = 3,
+
+    /** No battery at all. */
+    Absent = 4,
+
+    /** Its name. */
+    pub fn label(self) : string {
+        return match self {
+            BatteryState::Unknown => "unknown",
+            BatteryState::Charging => "charging",
+            BatteryState::Discharging => "on battery",
+            BatteryState::Full => "full",
+            BatteryState::Absent => "no battery",
+        };
+    }
+
+    /** The state a Linux `status` file says ("Charging", "Discharging", "Full", "Not charging"). */
+    pub static fn fromLinux(text : string) : BatteryState {
+        return match text {
+            "Charging" => BatteryState::Charging,
+            "Discharging" => BatteryState::Discharging,
+            "Full" | "Not charging" => BatteryState::Full,
+            _ => BatteryState::Unknown,
+        };
+    }
+}
+
+/** Whether the machine is plugged in. */
+pub enum Mains : i32 {
+    /** The system does not say. */
+    Unknown = 0,
+    Offline = 1,
+    Online = 2,
+
+    /** The state Windows' `ACLineStatus` numbers `n` (0 offline, 1 online, 255 unknown). */
+    pub static fn fromWindows(n : i32) : Mains {
+        return match n {
+            0 => Mains::Offline,
+            1 => Mains::Online,
+            _ => Mains::Unknown,
+        };
+    }
+}
+
+/** The machine's power. */
+pub struct PowerInfo {
+    /** How the battery stands. */
+    pub state       : BatteryState = BatteryState::Unknown;
+
+    /** Charge, 0 to 100; -1 when there is no battery or the system does not say. */
+    pub percent     : i32 = -1;
+
+    /** Whether it is plugged in. */
+    pub mains       : Mains = Mains::Unknown;
+
+    /** Minutes of charge left, or -1 when not known. */
+    pub minutesLeft : i32 = -1;
+
+    /** The reading of a machine with no battery. */
+    pub static fn none(mains : Mains) : PowerInfo {
+        return PowerInfo { state: BatteryState::Absent, mains: mains };
+    }
+
+    /** Whether there is a battery. */
+    pub fn hasBattery(self) : bool {
+        return self.state != BatteryState::Absent;
+    }
+
+    /** Whether it is known to be plugged in. */
+    pub fn pluggedIn(self) : bool {
+        return self.mains == Mains::Online;
+    }
+
+    /** One line: "78% · on battery · 3 h 12 min left". */
+    pub fn describe(self) : string {
+        if (!self.hasBattery()) {
+            return self.pluggedIn() ? "plugged in" : "no battery";
+        }
+        let charge : string = self.percent >= 0 ? self.percent.toString() + "%" : "?";
+        let mut line : string = charge + " · " + self.state.label();
+        if (self.minutesLeft >= 0) {
+            let hours : string = (self.minutesLeft / 60).toString();
+            let minutes : string = (self.minutesLeft % 60).toString();
+            line = line + " · " + hours + " h " + minutes + " min left";
+        }
+        return line;
+    }
+}

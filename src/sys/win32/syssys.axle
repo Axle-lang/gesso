@@ -1,0 +1,60 @@
+// sys/syssys — memory, processor time and power, on Windows: `GlobalMemoryStatusEx`, `GetSystemTimes` and
+// `GetSystemPowerStatus`.
+//
+// `GetSystemTimes` gives idle, kernel and user times as FILETIMEs (100 ns ticks); kernel time already
+// includes idle, so the total is kernel plus user.
+
+use crate::core::error::SysError;
+use crate::core::sysinfo::{CpuTimes, PowerInfo, Mains};
+use crate::sys::battery::Battery;
+use crate::sys::errno::Errno;
+use crate::sys::kernel32::{
+    GetLastError, GetSystemTimes, GetSystemPowerStatus, SPS_SIZE, SPS_AC, SPS_FLAG, SPS_PERCENT,
+    SPS_SECONDS, BATTERY_NONE, UNKNOWN_BYTE, UNKNOWN_DWORD, GlobalMemoryStatusEx, MEMSTATUS_SIZE,
+    MEMSTATUS_TOTAL, MEMSTATUS_AVAIL,
+};
+use crate::raw::mem::Raw;
+use crate::raw::buf::Buf;
+
+/** Memory, processor time and power. */
+pub class SysSys {
+    /** Physical memory: all of it and what can be had without pushing anything out, in bytes. */
+    pub static fn memory() : (total: i64, available: i64) ! SysError {
+        let s : Buf = new Buf(MEMSTATUS_SIZE);
+        s.putI32(0, MEMSTATUS_SIZE as i32);
+        if (GlobalMemoryStatusEx(s.ptr()) == 0) {
+            Errno::win32("system.memory", "the memory status", GetLastError());
+        }
+        return (s.i64At(MEMSTATUS_TOTAL), s.i64At(MEMSTATUS_AVAIL));
+    }
+
+    /** The processor's tick counters, all cores together. */
+    pub static fn cpuTimes() : CpuTimes ! SysError {
+        let t : Buf = new Buf(24);
+        if (GetSystemTimes(t.ptr(), Raw::plus(t.ptr(), 8), Raw::plus(t.ptr(), 16)) == 0) {
+            Errno::win32("system.cpu", "the processor times", GetLastError());
+        }
+        return new CpuTimes(t.i64At(0), t.i64At(8) + t.i64At(16));
+    }
+
+    /** The battery and the mains. */
+    pub static fn power() : PowerInfo ! SysError {
+        let s : Buf = new Buf(SPS_SIZE);
+        if (GetSystemPowerStatus(s.ptr()) == 0) {
+            Errno::win32("system.power", "the power status", GetLastError());
+        }
+        let mains : Mains = Mains::fromWindows(s.u8At(SPS_AC));
+        let flag : i32 = s.u8At(SPS_FLAG);
+        let percent : i32 = s.u8At(SPS_PERCENT);
+        let seconds : i64 = s.u32At(SPS_SECONDS);
+        if (flag == BATTERY_NONE) {
+            return PowerInfo::none(mains);
+        }
+        return PowerInfo {
+            state: Battery::state(flag, mains, percent),
+            percent: percent == UNKNOWN_BYTE ? -1 : percent,
+            mains: mains,
+            minutesLeft: seconds == UNKNOWN_DWORD ? -1 : (seconds / 60) as i32,
+        };
+    }
+}

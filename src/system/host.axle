@@ -1,0 +1,124 @@
+// host — the machine this program runs on: what it is, how big it is, how long it has been up, and who
+// is asking.
+//
+//     let info : HostInfo = Host::info();
+//     println(info.hostName + " · " + info.os + " " + info.arch + " · " + info.cpus.toString() + " cpus");
+//
+//     let mem : MemoryInfo = Host::memory();
+//     println(Bytes::human(mem.used()) + " of " + Bytes::human(mem.total) + " in use");
+//
+// Everything here is Portable: it answers the same question on every port. The name and the processor
+// count are the standard library's (`std::sys::sysinfo`), taken as they are. What `std` has no word
+// for — the standing of the process, how long the host has been up, and the memory — comes through
+// the `sys::os` and `sys::syssys` seams, one file per port.
+
+use std::sys::sysinfo;
+use crate::core::privilege::Privilege;
+use crate::core::error::{SysError, Denied};
+use crate::core::guard::Guard;
+use crate::core::units::Bytes;
+use crate::sys::os::Os;
+use crate::sys::syssys::SysSys;
+
+/** What the host is. */
+pub struct HostInfo {
+    /** The platform: "windows", "linux". */
+    pub os        : string = "";
+
+    /** The processor architecture: "x86_64". */
+    pub arch      : string = "";
+
+    /** The host's name. */
+    pub hostName  : string = "";
+
+    /** The user running the process. */
+    pub user      : string = "";
+
+    /** How many logical processors it has. */
+    pub cpus      : i32 = 0;
+
+    /** The standing of this process. */
+    pub privilege : Privilege = Privilege::User;
+
+    /** This process's id. */
+    pub pid       : i64 = 0;
+
+    /** One line: "ada@laptop · linux x86_64 · 8 cpus · pid 4120". */
+    pub fn describe(self) : string {
+        let machine : string = self.os + " " + self.arch + " · " + self.cpus.toString() + " cpus";
+        return self.user + "@" + self.hostName + " · " + machine + " · pid " + self.pid.toString();
+    }
+}
+
+/** Physical memory, in bytes. */
+pub struct MemoryInfo {
+    /** All of it. */
+    pub total     : i64 = 0;
+
+    /** What can be had without pushing anything out. */
+    pub available : i64 = 0;
+
+    /** What is in use. */
+    pub fn used(self) : i64 {
+        return self.total - self.available;
+    }
+
+    /** How much of it is in use, in tenths of a percent (1000 is all of it). */
+    pub fn loadTenths(self) : i64 {
+        if (self.total <= 0) {
+            return 0;
+        }
+        return (self.used() * 1000) / self.total;
+    }
+
+    /** One line: "19.2 GiB of 31.2 GiB (61%)". */
+    pub fn describe(self) : string {
+        let share : string = (self.loadTenths() / 10).toString() + "%";
+        return Bytes::human(self.used()) + " of " + Bytes::human(self.total) + " (" + share + ")";
+    }
+}
+
+/** The machine. */
+pub class Host {
+    /** The platform's name: "windows", "linux". */
+    pub static fn os() : string {
+        return Os::name();
+    }
+
+    /** What the host is, in one reading. */
+    pub static fn info() : HostInfo {
+        return HostInfo {
+            os: Os::name(),
+            arch: Os::arch(),
+            hostName: sysinfo::hostname(),
+            user: sysinfo::username(),
+            cpus: sysinfo::cpuCount(),
+            privilege: Os::privilege(),
+            pid: pid() as i64,
+        };
+    }
+
+    /** The standing of this process: an ordinary user, an elevated administrator, or the system. */
+    pub static fn privilege() : Privilege {
+        return Os::privilege();
+    }
+
+    /**
+     * Refuse at once, with `Denied`, unless this process holds `needs`; `op` and `what` say what was being
+     * attempted.
+     */
+    pub static fn require(needs : Privilege, op : string, what : string) : void ! Denied {
+        Guard::require(Os::privilege(), needs, op, what);
+    }
+
+    /** Physical memory, in one reading. */
+    pub static fn memory() : MemoryInfo ! SysError {
+        let (total, available) = SysSys::memory();
+        return MemoryInfo { total: total, available: available };
+    }
+
+    /** Milliseconds since the host started. */
+    pub static fn uptimeMillis() : i64 {
+        return Os::uptimeMillis();
+    }
+}
