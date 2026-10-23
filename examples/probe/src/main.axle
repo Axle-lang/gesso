@@ -1,0 +1,166 @@
+// probe — reads the machine with every part of gesso and prints what it found.
+//
+// It is the program to run first on a new machine: each section calls the library for one kind of
+// reading, prints it, and — when the system refuses — prints the precise reason and goes on to the
+// next section. Nothing is changed on the machine; every call here only looks. If a section prints a
+// nonsense number, the record offset behind it is the suspect (LIMITATIONS.md lists which ones have
+// never been run).
+//
+// Build & run:  axle build, then target/probe
+
+use gesso::{
+    Host, HostInfo, Power, CpuMeter, Procs, ProcInfo, ProcTree, Net, SocketTable, IfaceTable, Fs,
+    VolumeTable, VolumeInfo, EntryList, SysError, Span,
+};
+
+/** A heading. */
+fn section(title : string) : void {
+    println("");
+    println("── " + title + " ──");
+}
+
+/** What went wrong, as the library names it. */
+fn failed(e : SysError) : void {
+    println("  ! " + e.message);
+}
+
+/** `depth` levels of indentation. */
+fn indent(depth : i32) : string {
+    let mut s : string = "";
+    for (i of 0..depth) {
+        s = s + "  ";
+    }
+    return s;
+}
+
+/** The name of process `pid` in `procs`, or "?" when it is not there. */
+fn nameOf(procs : ProcInfo[], pid : i64) : string {
+    for (i of 0..procs.length) {
+        if (procs[i].pid == pid) {
+            return procs[i].name;
+        }
+    }
+    return pid < 0 ? "(owner not visible)" : "?";
+}
+
+/** The host, its memory, its processor and its power. */
+fn machine() : void {
+    section("host");
+    let info : HostInfo = Host::info();
+    println("  " + info.describe());
+    println("  running as: " + info.privilege.label());
+    println("  up for " + Span::human(Span::millis(Host::uptimeMillis())));
+    try {
+        println("  memory: " + Host::memory().describe());
+    } catch e : SysError {
+        failed(e);
+    }
+    try {
+        let cpu : CpuMeter = CpuMeter::start();
+        sleep(500);
+        cpu.update();
+        println("  processor: " + cpu.percent().toString() + "% busy over half a second");
+    } catch e : SysError {
+        failed(e);
+    }
+    try {
+        println("  power: " + Power::now().describe());
+    } catch e : SysError {
+        failed(e);
+    }
+}
+
+/** The first processes, drawn as the tree they are. */
+fn processes() : void {
+    section("processes");
+    try {
+        let tree : ProcTree = Procs::tree();
+        println(
+            "  " + tree.size().toString() + " processes, " + tree.rootCount().toString() + " roots"
+        );
+        let mut shown : i32 = 0;
+        for (row of 0..tree.size()) {
+            if (shown < 12 && tree.depthAt(row) <= 1) {
+                println("  " + indent(tree.depthAt(row)) + tree.infoAt(row).describe());
+                shown = shown + 1;
+            }
+        }
+        let me : i64 = Host::info().pid;
+        println("  this program: " + Procs::imagePath(me));
+        println("  its priority: " + Procs::priority(me).label());
+    } catch e : SysError {
+        failed(e);
+    }
+}
+
+/** Who is listening, and which process owns each socket. */
+fn network() : void {
+    section("network");
+    try {
+        let procs : ProcInfo[] = Procs::list();
+        let all : SocketTable = Net::sockets();
+        println(
+            "  " + all.size().toString() + " sockets, " + all.unowned().toString() + " with no visible owner"
+        );
+        let open : SocketTable = all.listening();
+        for (i of 0..open.size()) {
+            if (i < 10) {
+                println(
+                    "  listening " + open.at(
+                        i
+                    ).local.text() + "  ← " + nameOf(procs, open.at(i).pid)
+                );
+            }
+        }
+        println("  " + all.external().size().toString() + " connections to the internet");
+        let ifaces : IfaceTable = Net::interfaces();
+        for (i of 0..ifaces.size()) {
+            println("  " + ifaces.at(i).describe());
+        }
+        println(
+            "  gateway: " + Net::gateway().text() + " · online: " + (Net::isOnline() ? "yes" : "no")
+        );
+        println("  local address: " + Net::localAddress().text());
+    } catch e : SysError {
+        failed(e);
+    }
+}
+
+/** The volumes, and the current folder with what is in it. */
+fn files() : void {
+    section("files");
+    try {
+        let vols : VolumeTable = Fs::volumes();
+        for (i of 0..vols.size()) {
+            volume(vols.at(i));
+        }
+        let here : EntryList = Fs::list(".");
+        println("  here: " + here.describe());
+        for (i of 0..here.size()) {
+            if (i < 5) {
+                println("    " + here.at(i).describe());
+            }
+        }
+        println("  below: " + Fs::treeSize(".").describe());
+    } catch e : SysError {
+        failed(e);
+    }
+}
+
+/** One volume and its room, or why its room cannot be told. */
+fn volume(v : VolumeInfo) : void {
+    try {
+        println("  " + v.describe() + "  " + Fs::space(v.root).describe());
+    } catch e : SysError {
+        println("  " + v.describe() + "  (" + e.message + ")");
+    }
+}
+
+fn main() : i32 {
+    println("gesso probe — reading only, nothing is changed");
+    machine();
+    processes();
+    network();
+    files();
+    return 0;
+}
