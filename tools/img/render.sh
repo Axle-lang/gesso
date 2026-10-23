@@ -9,3 +9,6 @@ for name in layers contract tour; do
 done
 python3 crop.py ../../doc/img/*-full.png
 rm ../../doc/img/*-full.png
+# The GitHub social preview is 1280x640; the headless window is taller than the page, so it is cropped.
+"$CHROME" --headless --no-sandbox --disable-gpu --hide-scrollbars --force-device-scale-factor=1 --window-size=1280,800 --screenshot=/tmp/social-full.png "file://$PWD/social.html" >/dev/null 2>&1
+python3 -c "from PIL import Image; Image.open('/tmp/social-full.png').crop((0,0,1280,640)).save('../../doc/img/social.png', optimize=True)"
