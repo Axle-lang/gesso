@@ -1,0 +1,105 @@
+// sys/files — small reads of the kernel's files, for the Linux seams.
+//
+// `/proc` and `/sys` are text files and directories, and every seam on Linux reads a few of them. The
+// reads are here once: a file whole, a directory's names, a link's target. A read that fails raises
+// what the system said, sorted by `Errno`; the `try…` forms answer empty instead, for the files that
+// are legitimately absent (a kernel without IPv6 has no `/proc/net/tcp6`).
+
+use crate::core::error::SysError;
+use crate::core::list::Values;
+use crate::sys::errno::Errno;
+use crate::sys::libc::{
+    open, read, close, opendir, readdir, closedir, readlink, errnoLocation, O_RDONLY, DIRENT_NAME,
+};
+use crate::raw::mem::Raw;
+use crate::raw::buf::Buf;
+use crate::raw::wide::Narrow;
+
+/** Reading `/proc` and `/sys`. */
+pub class Files {
+    /** The calling thread's errno. */
+    pub static fn errno() : i32 {
+        return Raw::i32At(errnoLocation(), 0);
+    }
+
+    /** Forget the last error, for a call that signals failure only through errno. */
+    pub static fn clearErrno() : void {
+        Raw::putI32(errnoLocation(), 0, 0);
+    }
+
+    /** The whole text of the file at `path`; raises what the open or the read failed with. */
+    pub static fn slurp(op : string, path : string) : string ! SysError {
+        let name : Buf = Narrow::alloc(path);
+        let fd : i32 = open(name.ptr(), O_RDONLY);
+        if (fd < 0) {
+            Errno::posix(op, path, Files::errno());
+        }
+        let data : Buf = new Buf(8192);
+        let mut used : i64 = 0;
+        let mut more : bool = true;
+        while (more) {
+            data.grow(used + 4097);
+            let got : i64 = read(fd, Raw::plus(data.ptr(), used), 4096);
+            if (got < 0) {
+                let code : i32 = Files::errno();
+                close(fd);
+                Errno::posix(op, path, code);
+            }
+            used = used + got;
+            more = got > 0;
+        }
+        close(fd);
+        return Narrow::read(data.ptr(), used);
+    }
+
+    /** The text of the file at `path`, or an empty string when it cannot be read. */
+    pub static fn tryRead(path : string) : string {
+        try {
+            return Files::slurp("read", path);
+        } catch e : SysError {
+            return "";
+        }
+    }
+
+    /** Whether `path` is a directory that can be opened. */
+    pub static fn isDir(path : string) : bool {
+        let name : Buf = Narrow::alloc(path);
+        let dir : ptr = opendir(name.ptr());
+        if (Raw::isNil(dir)) {
+            return false;
+        }
+        closedir(dir);
+        return true;
+    }
+
+    /** The names in the directory `path`, without `.` and `..`; raises what the open failed with. */
+    pub static fn names(op : string, path : string) : string[] ! SysError {
+        let name : Buf = Narrow::alloc(path);
+        let dir : ptr = opendir(name.ptr());
+        if (Raw::isNil(dir)) {
+            Errno::posix(op, path, Files::errno());
+        }
+        let found : Values<string> = new Values<string>();
+        let mut entry : ptr = readdir(dir);
+        while (!Raw::isNil(entry)) {
+            let entryName : string = Narrow::read(Raw::plus(entry, DIRENT_NAME), 256);
+            if (entryName != "." && entryName != "..") {
+                found.add(entryName);
+            }
+            entry = readdir(dir);
+        }
+        closedir(dir);
+        return found.toArray();
+    }
+
+    /** The target of the link at `path`, or an empty string when it cannot be read. */
+    pub static fn linkOf(path : string) : string {
+        let link : Buf = Narrow::alloc(path);
+        let target : Buf = new Buf(4096);
+        let n : i64 = readlink(link.ptr(), target.ptr(), 4095);
+        if (n < 0) {
+            return "";
+        }
+        return Narrow::read(target.ptr(), n);
+    }
+}

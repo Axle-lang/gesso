@@ -1,0 +1,68 @@
+// sys/token — the process token and what it says of the caller, for the Windows host seam.
+
+use crate::core::privilege::Privilege;
+use crate::sys::kernel32::{GetCurrentProcess, CloseHandle};
+use crate::sys::advapi32::{OpenProcessToken, GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TOKEN_ELEVATION};
+use crate::raw::mem::Raw;
+use crate::raw::buf::Buf;
+
+/**
+ * The LocalSystem SID, S-1-5-18, as its twelve bytes: revision, one sub-authority, authority 5, sub-authority
+ * 18.
+ */
+const SID_SYSTEM_BYTES : i64 = 12;
+
+/** Reading the caller's token. */
+pub class Token {
+    /** The standing of this process: the system itself, an elevated administrator, or an ordinary user. */
+    pub static fn standing() : Privilege {
+        let token : ptr = Token::ofThisProcess();
+        if (Raw::isNil(token)) {
+            return Privilege::User;
+        }
+        let level : Privilege = Token::isSystem(
+            token
+        ) ? Privilege::System : (Token::isElevated(token) ? Privilege::Elevated : Privilege::User);
+        CloseHandle(token);
+        return level;
+    }
+
+    /** Whether the token is a full administrator's (`TokenElevation`). */
+    static fn isElevated(token : ptr) : bool {
+        let info : Buf = new Buf(8);
+        let used : Buf = new Buf(4);
+        return GetTokenInformation(
+            token,
+            TOKEN_ELEVATION,
+            info.ptr(),
+            4,
+            used.ptr()
+        ) != 0 && info.i32At(0) != 0;
+    }
+
+    /** The token of this process, opened for reading; null when Windows refuses. */
+    static fn ofThisProcess() : ptr {
+        let slot : Buf = new Buf(8);
+        if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, slot.ptr()) == 0) {
+            return Raw::nil();
+        }
+        return Raw::ptrAt(slot.ptr(), 0);
+    }
+
+    /** Whether the token runs as LocalSystem. */
+    static fn isSystem(token : ptr) : bool {
+        let info : Buf = new Buf(256);
+        let used : Buf = new Buf(4);
+        if (GetTokenInformation(token, TOKEN_USER, info.ptr(), 256, used.ptr()) == 0) {
+            return false;
+        }
+        let sid : ptr = Raw::ptrAt(info.ptr(), 0);
+        let expected : i32[] = [1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
+        for (i of 0..SID_SYSTEM_BYTES) {
+            if (Raw::u8At(sid, i) != expected[i as i64]) {
+                return false;
+            }
+        }
+        return true;
+    }
+}

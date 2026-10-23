@@ -1,0 +1,18 @@
+// sys/advapi32 — the advapi32 imports the Windows port uses: tokens, and what they say about a process.
+
+extern "C" from "advapi32" {
+    /** `BOOL OpenProcessToken(HANDLE, DWORD, PHANDLE)` — `token` is where the handle is written. */
+    fn OpenProcessToken(process : ptr, access : i32, token : ptr) : i32;
+
+    /** `BOOL GetTokenInformation(HANDLE, TOKEN_INFORMATION_CLASS, LPVOID, DWORD, PDWORD)`. */
+    fn GetTokenInformation(token : ptr, cls : i32, info : ptr, len : i32, ret : ptr) : i32;
+}
+
+/** `TOKEN_QUERY`. */
+const TOKEN_QUERY : i32 = 8;
+
+/** `TokenUser` — the SID of the account the process runs as. */
+const TOKEN_USER : i32 = 1;
+
+/** `TokenElevation` — a `TOKEN_ELEVATION`: one DWORD, non-zero when the token is elevated. */
+const TOKEN_ELEVATION : i32 = 20;

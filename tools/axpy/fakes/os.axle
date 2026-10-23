@@ -1,0 +1,25 @@
+// fakes/os — the `sys::os` seam as the tests see it: a host with nothing real behind it.
+//
+// The same public shape as src/sys/win32/os.axle and src/sys/linux/os.axle; the values are fixed, so
+// a test of `system::Host` checks what Host does with an answer and not what a machine happens to say.
+
+use crate::core::privilege::Privilege;
+
+/** A host that is always the same. */
+pub class Os {
+    pub static fn name() : string {
+        return "testos";
+    }
+    pub static fn separator() : string {
+        return "/";
+    }
+    pub static fn arch() : string {
+        return "x86_64";
+    }
+    pub static fn privilege() : Privilege {
+        return Privilege::User;
+    }
+    pub static fn uptimeMillis() : i64 {
+        return 90061000;
+    }
+}

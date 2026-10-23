@@ -1,0 +1,47 @@
+// sys/ntdll — the ntdll imports the Windows port uses: the system's process table, and suspending a process.
+//
+// These are the native calls under the documented ones. `NtQuerySystemInformation` is the call the Task
+// Manager's list is built on: one call returns every process with its thread count, times, parent and
+// memory, where the documented route (the Toolhelp snapshot) costs a handle and a copy per process
+// and does not carry the start time.
+
+extern "C" from "ntdll" {
+    /** `NTSTATUS NtQuerySystemInformation(SYSTEM_INFORMATION_CLASS, PVOID, ULONG len, PULONG returned)`. */
+    fn NtQuerySystemInformation(cls : i32, info : ptr, len : i32, returned : ptr) : i32;
+
+    /** `NTSTATUS NtSuspendProcess(HANDLE)` — freezes every thread; needs `PROCESS_SUSPEND_RESUME`. */
+    fn NtSuspendProcess(process : ptr) : i32;
+
+    /** `NTSTATUS NtResumeProcess(HANDLE)`. */
+    fn NtResumeProcess(process : ptr) : i32;
+}
+
+/** `SystemProcessInformation`. */
+const SYSTEM_PROCESS_INFORMATION : i32 = 5;
+
+/** `STATUS_INFO_LENGTH_MISMATCH` — the buffer was too small; `returned` says how much to offer. */
+const STATUS_INFO_LENGTH_MISMATCH : i32 = -1073741820;
+
+// ─── SYSTEM_PROCESS_INFORMATION field offsets (x86_64) ────────
+
+/** `ULONG NextEntryOffset` — bytes to the next record, 0 for the last. */
+const SPI_NEXT : i64 = 0x00;
+
+/** `ULONG NumberOfThreads`. */
+const SPI_THREADS : i64 = 0x04;
+
+/** `LARGE_INTEGER CreateTime` — 100 ns ticks since 1601. */
+const SPI_CREATE : i64 = 0x20;
+
+/** `UNICODE_STRING ImageName` — `USHORT Length` (bytes) at the start, and the buffer pointer at +8. */
+const SPI_NAME_LEN : i64 = 0x38;
+const SPI_NAME_BUF : i64 = 0x40;
+
+/** `HANDLE UniqueProcessId`. */
+const SPI_PID : i64 = 0x50;
+
+/** `HANDLE InheritedFromUniqueProcessId`. */
+const SPI_PARENT : i64 = 0x58;
+
+/** `SIZE_T WorkingSetSize`. */
+const SPI_WORKING_SET : i64 = 0x90;

@@ -1,0 +1,188 @@
+// sys/libc — the libc imports the Linux port uses, and the layouts of the records they fill.
+//
+// One file for the library's libc imports, because a name can be declared once in a package: the seams
+// import them from here.
+
+extern "C" from "c" {
+    /** `uid_t geteuid(void)`. */
+    fn geteuid() : i32;
+
+    /** `int sysinfo(struct sysinfo *info)`. */
+    @link(symbol="sysinfo")
+    fn systemInfo(info : ptr) : i32;
+
+    /**
+     * `int open(const char *path, int flags, ...)` — called with two arguments, which is all a read-only open
+     * takes.
+     */
+    fn open(path : ptr, flags : i32) : i32;
+
+    /** `ssize_t read(int fd, void *buf, size_t n)`. */
+    fn read(fd : i32, buf : ptr, n : i64) : i64;
+
+    /** `int close(int fd)`. */
+    fn close(fd : i32) : i32;
+
+    /** `DIR *opendir(const char *path)` — null on failure. */
+    fn opendir(path : ptr) : ptr;
+
+    /** `struct dirent *readdir(DIR *)` — null at the end; the record is valid until the next call. */
+    fn readdir(dir : ptr) : ptr;
+
+    /** `int closedir(DIR *)`. */
+    fn closedir(dir : ptr) : i32;
+
+    /** `ssize_t readlink(const char *path, char *buf, size_t n)` — the bytes are not NUL-terminated. */
+    fn readlink(path : ptr, buf : ptr, n : i64) : i64;
+
+    /**
+     * `int getpriority(int which, id_t who)` — -1 is also a valid answer, so errno is cleared first and read
+     * after.
+     */
+    fn getpriority(which : i32, who : i32) : i32;
+
+    /** `int setpriority(int which, id_t who, int prio)`. */
+    fn setpriority(which : i32, who : i32, prio : i32) : i32;
+
+    /** `int sched_getscheduler(pid_t)` — the policy: 0 other, 1 FIFO, 2 round robin, 3 batch, 5 idle. */
+    fn sched_getscheduler(pid : i32) : i32;
+
+    /** `int kill(pid_t, int sig)`. */
+    fn kill(pid : i32, sig : i32) : i32;
+
+    /** `long sysconf(int name)`. */
+    fn sysconf(name : i32) : i64;
+
+    /**
+     * `int statx(int dirfd, const char *path, int flags, unsigned mask, struct statx *buf)` — the same record
+     * on every architecture.
+     */
+    fn statx(dirfd : i32, path : ptr, flags : i32, mask : i32, buf : ptr) : i32;
+
+    /** `int statvfs(const char *path, struct statvfs *buf)`. */
+    fn statvfs(path : ptr, buf : ptr) : i32;
+
+    /** `int symlink(const char *target, const char *linkpath)`. */
+    fn symlink(target : ptr, linkpath : ptr) : i32;
+
+    /** `int chmod(const char *path, mode_t mode)`. */
+    fn chmod(path : ptr, mode : i32) : i32;
+
+    /** `int inotify_init1(int flags)`. */
+    fn inotify_init1(flags : i32) : i32;
+
+    /** `int inotify_add_watch(int fd, const char *path, uint32_t mask)`. */
+    fn inotify_add_watch(fd : i32, path : ptr, mask : i32) : i32;
+
+    /** `int poll(struct pollfd *fds, nfds_t n, int timeout)`. */
+    fn poll(fds : ptr, n : i64, timeoutMs : i32) : i32;
+
+    /** `int getifaddrs(struct ifaddrs **list)` — the list is released with `freeifaddrs`. */
+    fn getifaddrs(list : ptr) : i32;
+
+    /** `void freeifaddrs(struct ifaddrs *)`. */
+    fn freeifaddrs(list : ptr) : void;
+
+    /** `int *__errno_location(void)` — where this thread's errno lives (glibc and musl both export it). */
+    @link(symbol="__errno_location")
+    fn errnoLocation() : ptr;
+}
+
+// ─── struct sysinfo field offsets (x86_64, 112 bytes) ────────
+
+/** `long uptime` — seconds since boot. */
+const SI_UPTIME : i64 = 0;
+
+/** The size of the record. */
+const SI_SIZE : i64 = 112;
+
+// ─── Constants ────────────────────────────────────────────
+
+/** `O_RDONLY`. */
+const O_RDONLY : i32 = 0;
+
+/** `PRIO_PROCESS`. */
+const PRIO_PROCESS : i32 = 0;
+
+/** `_SC_CLK_TCK`. */
+const SC_CLK_TCK : i32 = 2;
+
+/** `_SC_PAGESIZE`. */
+const SC_PAGESIZE : i32 = 30;
+
+/** `SCHED_FIFO` and `SCHED_RR`: the real-time policies. */
+const SCHED_FIFO : i32 = 1;
+const SCHED_RR : i32 = 2;
+
+// ─── struct dirent field offsets (x86_64 glibc and musl) ────────
+
+/**
+ * `d_name`, after `ino_t d_ino` (8), `off_t d_off` (8), `unsigned short d_reclen` (2) and `unsigned char
+ * d_type` (1).
+ */
+const DIRENT_NAME : i64 = 19;
+
+// ─── struct ifaddrs and sockaddr field offsets (x86_64) ────────
+
+/**
+ * `struct ifaddrs *ifa_next`, `char *ifa_name`, `struct sockaddr *ifa_addr`, `struct sockaddr *ifa_netmask`.
+ */
+const IFA_NEXT : i64 = 0;
+const IFA_NAME : i64 = 8;
+const IFA_ADDR : i64 = 24;
+const IFA_NETMASK : i64 = 32;
+
+/** `AF_INET` and `AF_INET6`, the `sa_family` (a 16-bit word at offset 0) of the two addresses read here. */
+const AF_INET : i32 = 2;
+const AF_INET6 : i32 = 10;
+
+// ─── Files ────────────────────────────────────────────
+
+/** `AT_FDCWD`, `AT_SYMLINK_NOFOLLOW`, and `STATX_BASIC_STATS` (type, mode, size, times). */
+const AT_FDCWD : i32 = -100;
+const AT_SYMLINK_NOFOLLOW : i32 = 0x100;
+const STATX_BASIC_STATS : i32 = 0x7FF;
+
+/**
+ * `struct statx`: `__u16 stx_mode` (28), `__u64 stx_size` (40), `stx_mtime.tv_sec` (112) and `.tv_nsec`
+ * (120); 256 bytes.
+ */
+const STATX_SIZE : i64 = 256;
+const STATX_MODE : i64 = 28;
+const STATX_FILESIZE : i64 = 40;
+const STATX_MTIME_SEC : i64 = 112;
+const STATX_MTIME_NSEC : i64 = 120;
+
+/** `struct statvfs` (x86_64): `f_frsize` (8), `f_blocks` (16), `f_bfree` (24), `f_bavail` (32); 112 bytes. */
+const STATVFS_SIZE : i64 = 112;
+const STATVFS_FRSIZE : i64 = 8;
+const STATVFS_BLOCKS : i64 = 16;
+const STATVFS_BFREE : i64 = 24;
+const STATVFS_BAVAIL : i64 = 32;
+
+// ─── inotify and poll ────────────────────────────────────────────
+
+/** `IN_NONBLOCK | IN_CLOEXEC`. */
+const IN_INIT_FLAGS : i32 = 0x80800;
+
+/** The events watched: modify, attrib, moved from, moved to, create, delete, delete self, move self. */
+const IN_WATCH_MASK : i32 = 0xFC6;
+
+const IN_MODIFY : i32 = 0x2;
+const IN_ATTRIB : i32 = 0x4;
+const IN_MOVED_FROM : i32 = 0x40;
+const IN_MOVED_TO : i32 = 0x80;
+const IN_CREATE : i32 = 0x100;
+const IN_DELETE : i32 = 0x200;
+const IN_DELETE_SELF : i32 = 0x400;
+const IN_MOVE_SELF : i32 = 0x800;
+const IN_Q_OVERFLOW : i32 = 0x4000;
+
+/** `struct inotify_event`: `wd` (0), `mask` (4), `cookie` (8), `len` (12), then `name` (16). */
+const INOTIFY_MASK : i64 = 4;
+const INOTIFY_LEN : i64 = 12;
+const INOTIFY_NAME : i64 = 16;
+
+/** `struct pollfd` is `int fd; short events; short revents` (8 bytes); `POLLIN` is 1. */
+const POLLFD_SIZE : i64 = 8;
+const POLLIN : i32 = 1;

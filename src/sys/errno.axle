@@ -1,0 +1,170 @@
+// errno — an operating system's error number, turned into the library's own failures.
+//
+// Windows answers a failed call with a number from `GetLastError`, POSIX with `errno`. Neither means
+// anything to a caller who has to decide what to do: the table here sorts the ones that matter into
+// the reasons core/error names — denied, gone, busy, invalid, unsupported, expired — and leaves the
+// rest as an `OsFailure` carrying the number and, where it is well known, its symbolic name. A call
+// that is refused for want of a privilege therefore always arrives as `Denied`, with the privilege
+// named, and never as a bare code.
+
+use crate::core::privilege::Privilege;
+use crate::core::error::{SysError, Denied, Unsupported, Gone, Busy, Invalid, Expired, OsFailure};
+
+// ─── Windows ────────────────────────────────────────────
+
+const ERROR_FILE_NOT_FOUND : i32 = 2;
+const ERROR_PATH_NOT_FOUND : i32 = 3;
+const ERROR_TOO_MANY_OPEN_FILES : i32 = 4;
+const ERROR_ACCESS_DENIED : i32 = 5;
+const ERROR_NOT_ENOUGH_MEMORY : i32 = 8;
+const ERROR_INVALID_DATA : i32 = 13;
+const ERROR_SHARING_VIOLATION : i32 = 32;
+const ERROR_LOCK_VIOLATION : i32 = 33;
+const ERROR_HANDLE_EOF : i32 = 38;
+const ERROR_NOT_SUPPORTED : i32 = 50;
+const ERROR_INVALID_PARAMETER : i32 = 87;
+const ERROR_BROKEN_PIPE : i32 = 109;
+const ERROR_BUFFER_OVERFLOW : i32 = 111;
+const ERROR_INSUFFICIENT_BUFFER : i32 = 122;
+const ERROR_CALL_NOT_IMPLEMENTED : i32 = 120;
+const ERROR_INVALID_NAME : i32 = 123;
+const ERROR_BAD_ARGUMENTS : i32 = 160;
+const ERROR_BUSY : i32 = 170;
+const ERROR_ALREADY_EXISTS : i32 = 183;
+const ERROR_MORE_DATA : i32 = 234;
+const WAIT_TIMED_OUT : i32 = 258;
+const ERROR_IO_PENDING : i32 = 997;
+const ERROR_IO_DEVICE : i32 = 1117;
+const ERROR_NOT_FOUND : i32 = 1168;
+const ERROR_PRIVILEGE_NOT_HELD : i32 = 1314;
+const ERROR_INVALID_OWNER : i32 = 1346;
+const ERROR_TIMEOUT : i32 = 1460;
+
+// ─── POSIX ────────────────────────────────────────────
+
+const EPERM : i32 = 1;
+const ENOENT : i32 = 2;
+const ESRCH : i32 = 3;
+const EINTR : i32 = 4;
+const EIO : i32 = 5;
+const EBADF : i32 = 9;
+const EAGAIN : i32 = 11;
+const ENOMEM : i32 = 12;
+const EACCES : i32 = 13;
+const EBUSY : i32 = 16;
+const EEXIST : i32 = 17;
+const ENOTDIR : i32 = 20;
+const EISDIR : i32 = 21;
+const EINVAL : i32 = 22;
+const EMFILE : i32 = 24;
+const ETXTBSY : i32 = 26;
+const ENOSPC : i32 = 28;
+const EROFS : i32 = 30;
+const EPIPE : i32 = 32;
+const ERANGE : i32 = 34;
+const ENOSYS : i32 = 38;
+const ETIME : i32 = 62;
+const EADDRINUSE : i32 = 98;
+const ENETUNREACH : i32 = 101;
+const ECONNRESET : i32 = 104;
+const ETIMEDOUT : i32 = 110;
+const ECONNREFUSED : i32 = 111;
+const EOPNOTSUPP : i32 = 95;
+
+/** Error numbers to failures. */
+pub class Errno {
+    /** Throw the failure for Windows error `code`, met doing `op` to `what`. */
+    pub static fn win32(op : string, what : string, code : i32) : void ! SysError {
+        match code {
+            ERROR_ACCESS_DENIED | ERROR_PRIVILEGE_NOT_HELD | ERROR_INVALID_OWNER => {
+                throw Denied(op, what, Privilege::Elevated, code);
+            },
+            ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND | ERROR_NOT_FOUND => {
+                throw Gone(op, what);
+            },
+            ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION | ERROR_BUSY => {
+                throw Busy(op, what);
+            },
+            ERROR_INVALID_DATA | ERROR_INVALID_PARAMETER | ERROR_INVALID_NAME | ERROR_BAD_ARGUMENTS => {
+                let name : string = Errno::win32Name(code);
+                throw Invalid(op, what, name.byteLength > 0 ? name : "the system rejected it");
+            },
+            ERROR_NOT_SUPPORTED | ERROR_CALL_NOT_IMPLEMENTED => {
+                throw Unsupported(op, "windows", what);
+            },
+            WAIT_TIMED_OUT | ERROR_TIMEOUT => {
+                throw Expired(op, 0);
+            },
+            _ => {
+                throw OsFailure(op, code, Errno::win32Name(code));
+            },
+        }
+    }
+
+    /** Throw the failure for POSIX `errno` `code`, met doing `op` to `what`. */
+    pub static fn posix(op : string, what : string, code : i32) : void ! SysError {
+        match code {
+            EPERM | EACCES | EROFS => {
+                throw Denied(op, what, Privilege::Elevated, code);
+            },
+            ENOENT | ESRCH => {
+                throw Gone(op, what);
+            },
+            EAGAIN | EBUSY | ETXTBSY => {
+                throw Busy(op, what);
+            },
+            EBADF | EINVAL | ERANGE => {
+                throw Invalid(op, what, "the system rejected it");
+            },
+            ENOSYS | EOPNOTSUPP => {
+                throw Unsupported(op, "linux", what);
+            },
+            ETIME | ETIMEDOUT => {
+                throw Expired(op, 0);
+            },
+            _ => {
+                throw OsFailure(op, code, Errno::posixName(code));
+            },
+        }
+    }
+
+    /** What the well-known Windows errors are called; empty for the rest. */
+    pub static fn win32Name(code : i32) : string {
+        return match code {
+            ERROR_TOO_MANY_OPEN_FILES => "ERROR_TOO_MANY_OPEN_FILES",
+            ERROR_NOT_ENOUGH_MEMORY => "ERROR_NOT_ENOUGH_MEMORY",
+            ERROR_INVALID_DATA => "ERROR_INVALID_DATA",
+            ERROR_HANDLE_EOF => "ERROR_HANDLE_EOF",
+            ERROR_INVALID_PARAMETER => "ERROR_INVALID_PARAMETER",
+            ERROR_BROKEN_PIPE => "ERROR_BROKEN_PIPE",
+            ERROR_INSUFFICIENT_BUFFER => "ERROR_INSUFFICIENT_BUFFER",
+            ERROR_INVALID_NAME => "ERROR_INVALID_NAME",
+            ERROR_BAD_ARGUMENTS => "ERROR_BAD_ARGUMENTS",
+            ERROR_ALREADY_EXISTS => "ERROR_ALREADY_EXISTS",
+            ERROR_MORE_DATA => "ERROR_MORE_DATA",
+            ERROR_IO_PENDING => "ERROR_IO_PENDING",
+            ERROR_IO_DEVICE => "ERROR_IO_DEVICE",
+            _ => "",
+        };
+    }
+
+    /** What the well-known `errno` values are called; empty for the rest. */
+    pub static fn posixName(code : i32) : string {
+        return match code {
+            EINTR => "EINTR",
+            EIO => "EIO",
+            ENOMEM => "ENOMEM",
+            EEXIST => "EEXIST",
+            ENOTDIR => "ENOTDIR",
+            EISDIR => "EISDIR",
+            EMFILE => "EMFILE",
+            ENOSPC => "ENOSPC",
+            EPIPE => "EPIPE",
+            EADDRINUSE => "EADDRINUSE",
+            ENETUNREACH => "ENETUNREACH",
+            ECONNRESET => "ECONNRESET",
+            ECONNREFUSED => "ECONNREFUSED",
+            _ => "",
+        };
+    }
+}

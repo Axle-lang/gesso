@@ -1,0 +1,14 @@
+// sys/filetime — Windows time stamps, for the Windows seams.
+
+use crate::sys::kernel32::FILETIME_EPOCH;
+
+/** A `FILETIME`: 100 ns ticks since 1601. */
+pub class FileTime {
+    /** The ticks as milliseconds since 1970; 0 when they hold nothing. */
+    pub static fn millis(ticks : i64) : i64 {
+        if (ticks <= FILETIME_EPOCH) {
+            return 0;
+        }
+        return (ticks - FILETIME_EPOCH) / 10000;
+    }
+}

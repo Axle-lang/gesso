@@ -1,0 +1,48 @@
+// sys/os — what `std` does not say about the host, on Linux: how long it has been up, and who is asking.
+//
+// The host's name and its processor count are `std::sys::sysinfo`'s and are not read again
+// here; this seam holds what the standard library has no word for.
+//
+// The privilege reading is the effective user: root is `Elevated`. Linux has no "system account" apart
+// from root, so `System` is never answered here; a process that holds some of root's capabilities
+// without being root reads as an ordinary user, which understates it, and that is noted in
+// LIMITATIONS.md rather than guessed at.
+
+use crate::core::privilege::Privilege;
+use crate::sys::libc::{geteuid, systemInfo, SI_UPTIME, SI_SIZE};
+use crate::raw::buf::Buf;
+
+/** What the host is. */
+pub class Os {
+    /** The platform's name. */
+    pub static fn name() : string {
+        return "linux";
+    }
+
+    /** What separates the parts of a path. */
+    pub static fn separator() : string {
+        return "/";
+    }
+
+    /** The processor architecture this build runs on. */
+    pub static fn arch() : string {
+        return "x86_64";
+    }
+
+    /** The standing of this process. */
+    pub static fn privilege() : Privilege {
+        if (geteuid() == 0) {
+            return Privilege::Elevated;
+        }
+        return Privilege::User;
+    }
+
+    /** Milliseconds since the host started. */
+    pub static fn uptimeMillis() : i64 {
+        let info : Buf = new Buf(SI_SIZE);
+        if (systemInfo(info.ptr()) != 0) {
+            return 0;
+        }
+        return info.i64At(SI_UPTIME) * 1000;
+    }
+}

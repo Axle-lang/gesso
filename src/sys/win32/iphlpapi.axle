@@ -1,0 +1,160 @@
+// sys/iphlpapi — the iphlpapi imports the Windows port uses: the socket tables, the adapters, the routes.
+
+extern "C" from "iphlpapi" {
+    /**
+     * `DWORD GetExtendedTcpTable(PVOID, PDWORD size, BOOL order, ULONG family, TCP_TABLE_CLASS, ULONG)` — 0,
+     * or 122 when `size` was short (and is then the size needed).
+     */
+    fn GetExtendedTcpTable(
+        table : ptr,
+        size : ptr,
+        order : i32,
+        family : i32,
+        cls : i32,
+        reserved : i32
+    ) : i32;
+
+    /** `DWORD GetExtendedUdpTable(PVOID, PDWORD size, BOOL order, ULONG family, UDP_TABLE_CLASS, ULONG)`. */
+    fn GetExtendedUdpTable(
+        table : ptr,
+        size : ptr,
+        order : i32,
+        family : i32,
+        cls : i32,
+        reserved : i32
+    ) : i32;
+
+    /**
+     * `ULONG GetAdaptersAddresses(ULONG family, ULONG flags, PVOID, PIP_ADAPTER_ADDRESSES, PULONG size)` — 0,
+     * or 111 when `size` was short.
+     */
+    fn GetAdaptersAddresses(
+        family : i32,
+        flags : i32,
+        reserved : ptr,
+        list : ptr,
+        size : ptr
+    ) : i32;
+
+    /**
+     * `NETIO_STATUS GetIfEntry2(PMIB_IF_ROW2)` — the row's `InterfaceIndex` is set by the caller; 0 on
+     * success.
+     */
+    fn GetIfEntry2(row : ptr) : i32;
+
+    /**
+     * `DWORD GetIpForwardTable(PMIB_IPFORWARDTABLE, PULONG size, BOOL order)` — IPv4 only; 0, or 122 when
+     * `size` was short.
+     */
+    fn GetIpForwardTable(table : ptr, size : ptr, order : i32) : i32;
+}
+
+/** `AF_UNSPEC`, `AF_INET` and `AF_INET6`. */
+const AF_UNSPEC : i32 = 0;
+const AF_INET : i32 = 2;
+const AF_INET6 : i32 = 23;
+
+/** `TCP_TABLE_OWNER_PID_ALL` and `UDP_TABLE_OWNER_PID`. */
+const TCP_TABLE_OWNER_PID_ALL : i32 = 5;
+const UDP_TABLE_OWNER_PID : i32 = 1;
+
+/** `GAA_FLAG_SKIP_ANYCAST | SKIP_MULTICAST | SKIP_DNS_SERVER`: only unicast addresses are wanted. */
+const GAA_SKIP : i32 = 14;
+
+// ─── Socket tables (x64; proven by netaudit) ────────
+
+/** A table is a `DWORD` count followed by packed rows. */
+const TABLE_ROWS : i64 = 4;
+
+/** `MIB_TCPROW_OWNER_PID`: state, local address, local port, remote address, remote port, pid. */
+const TCP4_ROW : i64 = 24;
+const TCP4_STATE : i64 = 0;
+const TCP4_LOCAL_ADDR : i64 = 4;
+const TCP4_LOCAL_PORT : i64 = 8;
+const TCP4_REMOTE_ADDR : i64 = 12;
+const TCP4_REMOTE_PORT : i64 = 16;
+const TCP4_PID : i64 = 20;
+
+/**
+ * `MIB_TCP6ROW_OWNER_PID`: local address (16), scope, local port, remote address (16), scope, remote port,
+ * state, pid.
+ */
+const TCP6_ROW : i64 = 56;
+const TCP6_LOCAL_ADDR : i64 = 0;
+const TCP6_LOCAL_PORT : i64 = 20;
+const TCP6_REMOTE_ADDR : i64 = 24;
+const TCP6_REMOTE_PORT : i64 = 44;
+const TCP6_STATE : i64 = 48;
+const TCP6_PID : i64 = 52;
+
+/** `MIB_UDPROW_OWNER_PID`. */
+const UDP4_ROW : i64 = 12;
+const UDP4_LOCAL_ADDR : i64 = 0;
+const UDP4_LOCAL_PORT : i64 = 4;
+const UDP4_PID : i64 = 8;
+
+/** `MIB_UDP6ROW_OWNER_PID`. */
+const UDP6_ROW : i64 = 28;
+const UDP6_LOCAL_ADDR : i64 = 0;
+const UDP6_LOCAL_PORT : i64 = 20;
+const UDP6_PID : i64 = 24;
+
+// ─── IP_ADAPTER_ADDRESSES (x64, from the header's layout; not run) ────────
+
+/** `PIP_ADAPTER_ADDRESSES Next`, `PCHAR AdapterName`, `PIP_ADAPTER_UNICAST_ADDRESS FirstUnicastAddress`. */
+const AA_NEXT : i64 = 8;
+const AA_NAME : i64 = 16;
+const AA_UNICAST : i64 = 24;
+
+/** `PWCHAR Description` and `PWCHAR FriendlyName`. */
+const AA_DESCRIPTION : i64 = 64;
+const AA_FRIENDLY : i64 = 72;
+
+/** `BYTE PhysicalAddress[8]` and `DWORD PhysicalAddressLength`. */
+const AA_MAC : i64 = 80;
+const AA_MAC_LEN : i64 = 88;
+
+/** `DWORD Mtu`, `DWORD IfType`, `IF_OPER_STATUS OperStatus` (1 is up), `DWORD IfIndex` (at 4). */
+const AA_MTU : i64 = 96;
+const AA_IFTYPE : i64 = 100;
+const AA_OPER : i64 = 104;
+const AA_INDEX : i64 = 4;
+
+/** `ULONG64 TransmitLinkSpeed`, in bits per second. */
+const AA_TX_SPEED : i64 = 184;
+
+/** `IP_ADAPTER_UNICAST_ADDRESS`: `Next`, `SOCKET_ADDRESS.lpSockaddr`, `UINT8 OnLinkPrefixLength`. */
+const UA_NEXT : i64 = 8;
+const UA_SOCKADDR : i64 = 16;
+const UA_PREFIX : i64 = 56;
+
+/**
+ * `IF_TYPE_ETHERNET_CSMACD`, `IF_TYPE_IEEE80211`, `IF_TYPE_SOFTWARE_LOOPBACK`, `IF_TYPE_TUNNEL`,
+ * `IF_TYPE_PROP_VIRTUAL`.
+ */
+const IF_ETHERNET : i32 = 6;
+const IF_WIFI : i32 = 71;
+const IF_LOOPBACK : i32 = 24;
+const IF_TUNNEL : i32 = 131;
+const IF_VIRTUAL : i32 = 53;
+
+// ─── MIB_IF_ROW2 (x64, from the header's layout; not run) ────────
+
+/**
+ * The size of the record, `InterfaceIndex` (set by the caller), and the 64-bit counters `InOctets` and
+ * `OutOctets`.
+ */
+const IFROW2_SIZE : i64 = 1352;
+const IFROW2_INDEX : i64 = 8;
+const IFROW2_IN_OCTETS : i64 = 1208;
+const IFROW2_OUT_OCTETS : i64 = 1280;
+
+// ─── MIB_IPFORWARDROW (x64, 56 bytes) ────────
+
+/** Destination, mask, next hop (all in network byte order), interface index, metric. */
+const FW_ROW : i64 = 56;
+const FW_DEST : i64 = 0;
+const FW_MASK : i64 = 4;
+const FW_NEXTHOP : i64 = 12;
+const FW_IFINDEX : i64 = 16;
+const FW_METRIC : i64 = 36;
