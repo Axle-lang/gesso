@@ -1,0 +1,195 @@
+// sys/fssys — files and volumes, on Windows: attributes, the find API, the drive letters, and a folder watch.
+//
+// A path is described by `GetFileAttributesExW`; a reparse point (a symbolic link or a junction) is a
+// `Link`, described and not followed. A folder is listed with `FindFirstFileW` and a folder is watched
+// with `ReadDirectoryChangesW` over an overlapped handle, so `wait` can honour its timeout.
+//
+// Creating a symbolic link takes the right to do it: an administrator, or any user once Windows'
+// developer mode is on. Asking for it without either is refused by the system and arrives as `Denied`
+// naming the elevated session.
+
+use crate::core::error::{SysError, Gone, Unsupported};
+use crate::core::fsinfo::{PathText, FileStat, DirEntry, EntryList, SpaceInfo, VolumeTable};
+use crate::core::fswatch::ChangeFeed;
+use crate::core::watch::{Watch, WatchState};
+use crate::sys::errno::Errno;
+use crate::sys::attrs::Attrs;
+use crate::sys::dirwatch::DirWatch;
+use crate::sys::handles::Handles;
+use crate::sys::kernel32::{
+    FILEDATA_ATTRIBUTES, GetLastError, CloseHandle, GetLogicalDriveStringsW, GetDiskFreeSpaceExW,
+    SetFileAttributesW, FindFirstFileW, FindNextFileW, FindClose, CreateSymbolicLinkW, DeviceIoControl,
+    FILE_ATTRIBUTE_READONLY, FIND_SIZE, FIND_NAME, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FSCTL_GET_REPARSE_POINT, SYMLINK_DIRECTORY, SYMLINK_UNPRIVILEGED,
+};
+use crate::raw::mem::Raw;
+use crate::raw::buf::Buf;
+use crate::raw::wide::Wide;
+
+/** The room for a reparse point's record. */
+const REPARSE_BYTES : i64 = 16384;
+
+/** `ERROR_NOT_A_REPARSE_POINT`: the path is an ordinary file. */
+const ERROR_NOT_A_REPARSE_POINT : i32 = 4390;
+
+/** `IO_REPARSE_TAG_SYMLINK`. */
+const TAG_SYMLINK : i64 = 0xA000000C;
+
+/** A watch on one folder. */
+pub class FsWatcher : ChangeFeed, Watch {
+    handle : DirWatch;
+
+    /** A watcher over `handle`. */
+    constructor(own handle : DirWatch) {
+        super();
+        self.handle = handle;
+    }
+    pub fn wait(mut self, timeoutMs : i32) : WatchState ! SysError {
+        let standing : WatchState = self.standing();
+        if (standing != WatchState::Idle) {
+            return standing;
+        }
+        return self.handle.poll(timeoutMs, self.queue);
+    }
+    pub fn close(mut self) : void {
+        if (self.isOpen()) {
+            self.handle.close();
+            self.markClosed();
+        }
+    }
+}
+
+/** Files and volumes. */
+pub class FsSys {
+    /** What `path` is; a link is described, not followed. */
+    pub static fn stat(path : string) : FileStat ! SysError {
+        return Attrs::statOf(path, Attrs::read("fs.stat", path));
+    }
+
+    /** The entries of the folder `path`, each described. */
+    pub static fn list(path : string) : EntryList ! SysError {
+        let pattern : Buf = Wide::alloc(PathText::join(path, "*", "\\"));
+        let data : Buf = new Buf(FIND_SIZE);
+        let h : ptr = FindFirstFileW(pattern.ptr(), data.ptr());
+        if (Raw::addr(h) == -1) {
+            let code : i32 = GetLastError();
+            // A folder with nothing in it still has "." and "..", so "no more files" here means the path was
+            // not a folder.
+            Errno::win32("fs.list", path, code);
+        }
+        let out : EntryList = new EntryList();
+        let mut more : bool = true;
+        while (more) {
+            let name : string = Wide::read(Raw::plus(data.ptr(), FIND_NAME), 260);
+            if (name != "." && name != "..") {
+                out.add(new DirEntry(name, Attrs::statOf(PathText::join(path, name, "\\"), data)));
+            }
+            more = FindNextFileW(h, data.ptr()) != 0;
+        }
+        FindClose(h);
+        return out;
+    }
+
+    /** The drives; Windows has no virtual ones to leave out, so `all` changes nothing. */
+    pub static fn volumes(all : bool) : VolumeTable ! SysError {
+        let letters : Buf = new Buf(1024);
+        let n : i32 = GetLogicalDriveStringsW(511, letters.ptr());
+        if (n <= 0) {
+            Errno::win32("fs.volumes", "the drive list", GetLastError());
+        }
+        let table : VolumeTable = new VolumeTable();
+        let mut at : i32 = 0;
+        while (at < n) {
+            let root : string = Wide::read(Raw::plus(letters.ptr(), (at * 2) as i64), 260);
+            if (root.byteLength == 0) {
+                break;
+            }
+            table.add(Attrs::volumeAt(root));
+            at = at + (root.byteLength as i32) + 1;
+        }
+        return table;
+    }
+
+    /** The room on the volume that holds `path`. */
+    pub static fn space(path : string) : SpaceInfo ! SysError {
+        let name : Buf = Wide::alloc(path);
+        let cells : Buf = new Buf(24);
+        let p : ptr = cells.ptr();
+        if (GetDiskFreeSpaceExW(name.ptr(), p, Raw::plus(p, 8), Raw::plus(p, 16)) == 0) {
+            Errno::win32("fs.space", path, GetLastError());
+        }
+        return new SpaceInfo(cells.i64At(8), cells.i64At(16), cells.i64At(0));
+    }
+
+    /** Where the link `path` points. */
+    pub static fn readLink(path : string) : string ! SysError {
+        let h : ptr = Handles::open(
+            "fs.readLink",
+            path,
+            0,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT
+        );
+        let out : Buf = new Buf(REPARSE_BYTES);
+        let got : Buf = new Buf(4);
+        let ok : i32 = DeviceIoControl(
+            h,
+            FSCTL_GET_REPARSE_POINT,
+            Raw::nil(),
+            0,
+            out.ptr(),
+            REPARSE_BYTES as i32,
+            got.ptr(),
+            Raw::nil()
+        );
+        let code : i32 = GetLastError();
+        CloseHandle(h);
+        if (ok == 0 && code == ERROR_NOT_A_REPARSE_POINT) {
+            throw Gone("fs.readLink", path + " is not a link");
+        }
+        if (ok == 0) {
+            Errno::win32("fs.readLink", path, code);
+        }
+        // A symbolic link keeps its names from byte 20, a mount point from byte 16; the print name is the
+        // readable one.
+        let start : i64 = out.u32At(0) == TAG_SYMLINK ? 20 : 16;
+        let offset : i64 = out.u16At(12);
+        let length : i64 = out.u16At(14);
+        return Wide::readN(Raw::plus(out.ptr(), start + offset), (length / 2) as i32);
+    }
+
+    /** Make `path` a symbolic link to `target`. */
+    pub static fn makeLink(target : string, path : string) : void ! SysError {
+        let t : Buf = Wide::alloc(target);
+        let p : Buf = Wide::alloc(path);
+        let mut flags : i32 = SYMLINK_UNPRIVILEGED;
+        try {
+            flags = FsSys::stat(target).isDir() ? (flags | SYMLINK_DIRECTORY) : flags;
+        } catch e : Gone {
+            // The target does not exist yet: a link to a file is made.
+        }
+        if ((CreateSymbolicLinkW(p.ptr(), t.ptr(), flags) & 255) == 0) {
+            Errno::win32("fs.makeLink", path, GetLastError());
+        }
+    }
+
+    /** Forbid or allow writing. */
+    pub static fn setReadOnly(path : string, readOnly : bool) : void ! SysError {
+        let attrs : i32 = Attrs::read("fs.setReadOnly", path).i32At(FILEDATA_ATTRIBUTES);
+        let flag : i32 = FILE_ATTRIBUTE_READONLY;
+        let next : i32 = readOnly ? (attrs | flag) : (attrs - (attrs & flag));
+        let name : Buf = Wide::alloc(path);
+        if (SetFileAttributesW(name.ptr(), next) == 0) {
+            Errno::win32("fs.setReadOnly", path, GetLastError());
+        }
+    }
+
+    /** Windows has no permission bits; see `setReadOnly` and, later, the ACL calls. */
+    pub static fn setMode(path : string, mode : i32) : void ! SysError {
+        throw Unsupported("fs.setMode", "windows", "permission bits (use read-only, or an ACL)");
+    }
+
+    /** Watch the folder `path` for changes to its entries. */
+    pub static fn watch(path : string) : FsWatcher ! SysError {
+        return new FsWatcher(DirWatch::open(path));
+    }
+}

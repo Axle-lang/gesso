@@ -1,0 +1,32 @@
+// sys/handles — opening a file or folder for the calls that want a handle, for the Windows seams.
+
+use crate::core::error::SysError;
+use crate::sys::errno::Errno;
+use crate::sys::kernel32::{GetLastError, CreateFileW, FILE_SHARE_ALL, OPEN_EXISTING};
+use crate::raw::mem::Raw;
+use crate::raw::buf::Buf;
+use crate::raw::wide::Wide;
+
+/** Opening handles. */
+pub class Handles {
+    /**
+     * The handle on the existing file or folder `path`, opened with `access` and `flags`; raises why not,
+     * naming `op`.
+     */
+    pub static fn open(op : string, path : string, access : i32, flags : i32) : ptr ! SysError {
+        let name : Buf = Wide::alloc(path);
+        let handle : ptr = CreateFileW(
+            name.ptr(),
+            access,
+            FILE_SHARE_ALL,
+            Raw::nil(),
+            OPEN_EXISTING,
+            flags,
+            Raw::nil()
+        );
+        if (Raw::addr(handle) == -1) {
+            Errno::win32(op, path, GetLastError());
+        }
+        return handle;
+    }
+}

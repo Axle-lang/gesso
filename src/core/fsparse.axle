@@ -1,0 +1,144 @@
+// fsparse — reading what Linux says about mounts, from `/proc/mounts` text already in hand.
+//
+// A line is `device mountpoint fstype options dump pass`. Spaces, tabs, newlines and backslashes inside
+// the device or the mount point are written as octal escapes (`\040` for a space), so a split on blanks
+// is safe and the unescape comes after it.
+
+use crate::core::fsinfo::{VolumeInfo, VolumeTable, VolumeKind};
+use crate::core::scan::{Scan, Line, Field};
+use crate::core::text::Utf8;
+
+/** File systems held in memory. */
+const RAM_FS : string = " tmpfs ramfs ";
+
+/** File systems reached over the network. */
+const NETWORK_FS : string = " nfs nfs4 cifs smb3 smbfs 9p ncpfs afs ceph glusterfs ";
+
+/** File systems of discs. */
+const OPTICAL_FS : string = " iso9660 udf ";
+
+/** File systems that are the kernel's own view of itself, not storage. */
+const KERNEL_FS : string = " proc sysfs devpts devtmpfs cgroup cgroup2 securityfs debugfs tracefs configfs ";
+
+/** File systems that are a kernel feature's control surface. */
+const FEATURE_FS : string = " fusectl pstore bpf mqueue hugetlbfs binfmt_misc nsfs efivarfs rpc_pipefs ";
+
+/** File systems that only stack or pack others. */
+const LAYER_FS : string = " overlay squashfs autofs ";
+
+/** Mount text, read. */
+pub class MountText {
+    /** Whether `c` is an octal digit. */
+    static fn isOctal(c : i32) : bool {
+        return c >= 48 && c <= 55;
+    }
+
+    /** Whether a `\NNN` octal escape starts at byte `i` of `text`. */
+    static fn escapeAt(text : string, i : i64) : bool {
+        return text.byteAt(
+            i
+        ) == 92 && i + 3 < text.byteLength && MountText::isOctal(
+            text.byteAt(i + 1)
+        ) && MountText::isOctal(text.byteAt(i + 2)) && MountText::isOctal(text.byteAt(i + 3));
+    }
+
+    /** `text` with `\NNN` octal escapes turned into the characters they stand for. */
+    pub static fn unescape(text : string) : string {
+        let mut s : string = "";
+        let mut i : i64 = 0;
+        while (i < text.byteLength) {
+            if (MountText::escapeAt(text, i)) {
+                let hundreds : i32 = text.byteAt(i + 1) - 48;
+                let tens : i32 = text.byteAt(i + 2) - 48;
+                let units : i32 = text.byteAt(i + 3) - 48;
+                s = s + MountText::byteText(hundreds * 64 + tens * 8 + units);
+                i = i + 4;
+            } else {
+                s = s + Utf8::slice(text, i, i + 1);
+                i = i + 1;
+            }
+        }
+        return s;
+    }
+
+    /**
+     * The one-character text of byte `v` (ASCII; the escapes that occur in mount lines are blanks and
+     * backslashes).
+     */
+    static fn byteText(v : i32) : string {
+        return match v {
+            32 => " ",
+            9 => "\t",
+            10 => "\n",
+            92 => "\\",
+            _ => "?",
+        };
+    }
+
+    /** Whether `word` is one of the blank-separated words of `list` (which starts and ends with a blank). */
+    static fn listed(list : string, word : string) : bool {
+        return Scan::has(list, " " + word + " ");
+    }
+
+    /** Whether `fsType` is the system looking at itself rather than storage. */
+    static fn isVirtual(fsType : string) : bool {
+        return MountText::listed(KERNEL_FS, fsType)
+            || MountText::listed(FEATURE_FS, fsType)
+            || MountText::listed(LAYER_FS, fsType);
+    }
+
+    /** The kind of storage a file system type stands for. */
+    pub static fn kindOf(fsType : string) : VolumeKind {
+        if (Scan::has(fsType, "fuse.sshfs") || Scan::has(fsType, "fuse.rclone")) {
+            return VolumeKind::Network;
+        }
+        if (MountText::listed(RAM_FS, fsType)) {
+            return VolumeKind::Ram;
+        }
+        if (MountText::listed(NETWORK_FS, fsType)) {
+            return VolumeKind::Network;
+        }
+        if (MountText::listed(OPTICAL_FS, fsType)) {
+            return VolumeKind::Optical;
+        }
+        if (MountText::isVirtual(fsType)) {
+            return VolumeKind::Virtual;
+        }
+        return VolumeKind::Fixed;
+    }
+
+    /**
+     * Add to `table` the mounts listed in `text` (the content of `/proc/mounts`); `all` keeps the virtual
+     * ones too.
+     */
+    pub static fn parse(text : string, all : bool, table : VolumeTable) : void {
+        let mut at : i64 = 0;
+        while (at < text.byteLength) {
+            let row : Line = Line::at(text, at);
+            at = row.next();
+            let device : Field = row.field(0);
+            let mountPoint : Field = row.field(1);
+            let fsType : Field = row.field(2);
+            if (!device.present() || !mountPoint.present() || !fsType.present()) {
+                continue;
+            }
+            let kind : VolumeKind = MountText::kindOf(fsType.text());
+            if (all || kind != VolumeKind::Virtual) {
+                table.add(
+                    new VolumeInfo(
+                        MountText::unescape(mountPoint.text()),
+                        MountText::unescape(device.text()),
+                        "",
+                        fsType.text(),
+                        kind
+                    )
+                );
+            }
+        }
+    }
+
+    /** Whether a file browser hides a file called `name`: it starts with a dot. */
+    pub static fn isHidden(name : string) : bool {
+        return name.byteLength > 1 && name.byteAt(0) == 46 && name != "..";
+    }
+}

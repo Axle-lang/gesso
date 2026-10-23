@@ -1,0 +1,119 @@
+// sys/inotify — a folder watch, for the Linux file seam.
+//
+// The descriptor is non-blocking and `poll` supplies the timeout, so a wait blocks for at most the time
+// it is given. A read returns a batch of `inotify_event` records, each followed by the name it is about.
+
+use crate::core::error::SysError;
+use crate::core::fswatch::{ChangeKind, ChangeQueue};
+use crate::core::watch::WatchState;
+use crate::sys::errno::{Errno, EINTR};
+use crate::sys::files::Files;
+use crate::sys::libc::{
+    inotify_init1, inotify_add_watch, poll, read, close, IN_INIT_FLAGS, IN_WATCH_MASK, IN_MODIFY, IN_ATTRIB,
+    IN_MOVED_FROM, IN_MOVED_TO, IN_CREATE, IN_DELETE, IN_DELETE_SELF, IN_MOVE_SELF, IN_Q_OVERFLOW,
+    INOTIFY_MASK, INOTIFY_LEN, INOTIFY_NAME, POLLFD_SIZE, POLLIN,
+};
+use crate::raw::mem::Raw;
+use crate::raw::buf::Buf;
+use crate::raw::wide::Narrow;
+
+/** The room for one batch of events. */
+const BATCH_BYTES : i64 = 65536;
+
+/** A watch on one folder. */
+pub class Inotify {
+    fd : i32;
+
+    /** A watch on the descriptor `fd`, which already has its folder added. */
+    constructor(fd : i32) {
+        self.fd = fd;
+    }
+
+    /** Start watching the folder `path`. */
+    pub static fn open(path : string) : Inotify ! SysError {
+        let fd : i32 = inotify_init1(IN_INIT_FLAGS);
+        if (fd < 0) {
+            Errno::posix("fs.watch", path, Files::errno());
+        }
+        let name : Buf = Narrow::alloc(path);
+        if (inotify_add_watch(fd, name.ptr(), IN_WATCH_MASK) < 0) {
+            let code : i32 = Files::errno();
+            close(fd);
+            Errno::posix("fs.watch", path, code);
+        }
+        return new Inotify(fd);
+    }
+
+    /** Wait up to `timeoutMs` for events, and put what they say in `queue`. */
+    pub fn poll(self, timeoutMs : i32, queue : ChangeQueue) : WatchState ! SysError {
+        let fds : Buf = new Buf(POLLFD_SIZE);
+        fds.putI32(0, self.fd);
+        fds.putU16(4, POLLIN);
+        let rc : i32 = poll(fds.ptr(), 1, timeoutMs);
+        if (rc < 0) {
+            let code : i32 = Files::errno();
+            // A signal cut the wait short: nothing happened, and the caller asks again.
+            if (code == EINTR) {
+                return WatchState::Idle;
+            }
+            Errno::posix("fs.watch", "the folder", code);
+        }
+        if (rc == 0) {
+            return WatchState::Idle;
+        }
+        let data : Buf = new Buf(BATCH_BYTES);
+        let got : i64 = read(self.fd, data.ptr(), BATCH_BYTES);
+        if (got < 0) {
+            Errno::posix("fs.watch", "the folder", Files::errno());
+        }
+        if (Inotify::drain(queue, data, got)) {
+            return WatchState::Lost;
+        }
+        return queue.isEmpty() ? WatchState::Idle : WatchState::Ready;
+    }
+
+    /**
+     * Turn the batch of events in `data` (`used` bytes) into queued changes; true when the system said it
+     * dropped some.
+     */
+    static fn drain(queue : ChangeQueue, data : Buf, used : i64) : bool {
+        let mut lost : bool = false;
+        let mut off : i64 = 0;
+        while (off + INOTIFY_NAME <= used) {
+            let mask : i32 = data.i32At(off + INOTIFY_MASK);
+            let len : i64 = data.u32At(off + INOTIFY_LEN);
+            let name : string = len > 0 ? Narrow::read(
+                Raw::plus(data.ptr(), off + INOTIFY_NAME),
+                len
+            ) : "";
+            lost = lost || (mask & IN_Q_OVERFLOW) != 0;
+            Inotify::push(queue, mask, name);
+            off = off + INOTIFY_NAME + len;
+        }
+        return lost;
+    }
+
+    /** Queue the changes one event's `mask` says happened to `name`. */
+    static fn push(queue : ChangeQueue, mask : i32, name : string) : void {
+        if ((mask & IN_CREATE) != 0) {
+            queue.push(ChangeKind::Created, name);
+        }
+        if ((mask & (IN_DELETE | IN_DELETE_SELF)) != 0) {
+            queue.push(ChangeKind::Deleted, name);
+        }
+        if ((mask & (IN_MODIFY | IN_ATTRIB)) != 0) {
+            queue.push(ChangeKind::Modified, name);
+        }
+        if ((mask & (IN_MOVED_FROM | IN_MOVE_SELF)) != 0) {
+            queue.push(ChangeKind::RenamedFrom, name);
+        }
+        if ((mask & IN_MOVED_TO) != 0) {
+            queue.push(ChangeKind::RenamedTo, name);
+        }
+    }
+
+    /** Stop watching and release the descriptor. */
+    pub fn close(self) : void {
+        close(self.fd);
+    }
+}

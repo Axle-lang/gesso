@@ -1,0 +1,141 @@
+// sys/dirwatch — a folder watch, for the Windows file seam.
+//
+// `ReadDirectoryChangesW` over an overlapped handle: the call returns at once and signals an event when
+// the system has a batch of changes, so a wait can honour its timeout. A batch is a chain of
+// `FILE_NOTIFY_INFORMATION` records.
+
+use crate::core::error::SysError;
+use crate::core::fswatch::{ChangeKind, ChangeQueue};
+use crate::core::watch::WatchState;
+use crate::sys::errno::Errno;
+use crate::sys::handles::Handles;
+use crate::sys::kernel32::{
+    GetLastError, CloseHandle, CreateEventW, WaitForSingleObject, GetOverlappedResult, CancelIoEx,
+    ReadDirectoryChangesW, FILE_LIST_DIRECTORY, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED,
+    WAIT_SIGNALLED, WAIT_TIMEOUT, NOTIFY_FILTER, OVERLAPPED_SIZE, OVERLAPPED_EVENT, FNI_NEXT, FNI_ACTION,
+    FNI_LENGTH, FNI_NAME,
+};
+use crate::raw::mem::Raw;
+use crate::raw::buf::Buf;
+use crate::raw::wide::Wide;
+
+/** The room for one batch of changes. */
+const BATCH_BYTES : i64 = 65536;
+
+/** A watch on one folder. */
+pub class DirWatch {
+    dir        : ptr;
+    event      : ptr;
+    armed      : bool = false;
+    data       : Buf;
+    overlapped : Buf;
+
+    /** A watch on the folder handle `dir`, signalled through `event`. */
+    constructor(dir : ptr, event : ptr) {
+        self.dir = dir;
+        self.event = event;
+        self.data = new Buf(BATCH_BYTES);
+        self.overlapped = new Buf(OVERLAPPED_SIZE);
+    }
+
+    /** Start watching the folder `path`. */
+    pub static fn open(path : string) : DirWatch ! SysError {
+        let dir : ptr = Handles::open(
+            "fs.watch",
+            path,
+            FILE_LIST_DIRECTORY,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED
+        );
+        let event : ptr = CreateEventW(Raw::nil(), 1, 0, Raw::nil());
+        if (Raw::isNil(event)) {
+            let code : i32 = GetLastError();
+            CloseHandle(dir);
+            Errno::win32("fs.watch", path, code);
+        }
+        return new DirWatch(dir, event);
+    }
+
+    /** Ask the system for the next batch of changes. */
+    fn arm(mut self) : void ! SysError {
+        self.overlapped.fit(OVERLAPPED_SIZE);
+        Raw::putPtr(self.overlapped.ptr(), OVERLAPPED_EVENT, self.event);
+        self.data.fit(BATCH_BYTES);
+        let rc : i32 = ReadDirectoryChangesW(
+            self.dir,
+            self.data.ptr(),
+            BATCH_BYTES as i32,
+            0,
+            NOTIFY_FILTER,
+            Raw::nil(),
+            self.overlapped.ptr(),
+            Raw::nil()
+        );
+        if (rc == 0) {
+            Errno::win32("fs.watch", "the folder", GetLastError());
+        }
+        self.armed = true;
+    }
+
+    /** Wait up to `timeoutMs` for a batch, and put what it holds in `queue`. */
+    pub fn poll(mut self, timeoutMs : i32, queue : ChangeQueue) : WatchState ! SysError {
+        if (!self.armed) {
+            self.arm();
+        }
+        let rc : i32 = WaitForSingleObject(self.event, timeoutMs);
+        if (rc == WAIT_TIMEOUT) {
+            return WatchState::Idle;
+        }
+        if (rc != WAIT_SIGNALLED) {
+            Errno::win32("fs.watch", "the folder", GetLastError());
+        }
+        let got : Buf = new Buf(4);
+        let ok : i32 = GetOverlappedResult(self.dir, self.overlapped.ptr(), got.ptr(), 0);
+        self.armed = false;
+        if (ok == 0) {
+            Errno::win32("fs.watch", "the folder", GetLastError());
+        }
+        // A batch of no bytes is one that did not fit, and the system kept none of it.
+        let lost : bool = got.u32At(0) == 0;
+        if (!lost) {
+            self.drain(queue, got.u32At(0));
+        }
+        self.arm();
+        return lost ? WatchState::Lost : WatchState::Ready;
+    }
+
+    /** Turn the batch the system wrote (`used` bytes) into queued changes. */
+    fn drain(self, queue : ChangeQueue, used : i64) : void {
+        let mut off : i64 = 0;
+        let mut more : bool = used > 0;
+        while (more) {
+            let kind : ChangeKind = DirWatch::kindOf(self.data.i32At(off + FNI_ACTION));
+            let bytes : i32 = self.data.i32At(off + FNI_LENGTH);
+            let name : string = Wide::readN(Raw::plus(self.data.ptr(), off + FNI_NAME), bytes / 2);
+            queue.push(kind, name);
+            let next : i64 = self.data.u32At(off + FNI_NEXT);
+            more = next > 0;
+            off = off + next;
+        }
+    }
+
+    /**
+     * The change `FILE_NOTIFY_INFORMATION.Action` numbers `action` (1 added, 2 removed, 3 modified, 4 old
+     * name, 5 new name).
+     */
+    static fn kindOf(action : i32) : ChangeKind {
+        return match action {
+            1 => ChangeKind::Created,
+            2 => ChangeKind::Deleted,
+            4 => ChangeKind::RenamedFrom,
+            5 => ChangeKind::RenamedTo,
+            _ => ChangeKind::Modified,
+        };
+    }
+
+    /** Stop watching and release the handles. */
+    pub fn close(mut self) : void {
+        CancelIoEx(self.dir, Raw::nil());
+        CloseHandle(self.dir);
+        CloseHandle(self.event);
+    }
+}

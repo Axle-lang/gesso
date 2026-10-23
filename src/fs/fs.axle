@@ -1,0 +1,202 @@
+// fs — files and volumes: what a path is, what a folder holds, what a drive has left, and when a folder
+// changes.
+//
+//     let space : SpaceInfo = Fs::space("/home");              // how full is the disk this is on
+//     let items : EntryList = Fs::list("/home/me");            // each name with its kind, size and time
+//     let size : TreeSize = Fs::treeSize("/home/me/project");  // bytes, files and folders below
+//     let watch : FsWatcher = Fs::watch("/home/me/inbox");     // …and wait for it to change
+//
+// The standard library already reads, writes, renames and deletes; this adds what it does not say: the
+// volumes, the room left, a link as a link, a folder's contents with their kinds, and a watcher.
+// Looking is `Access::Read`. Making a link or changing a mode is `Access::Change`: the system lets a
+// user do it to their own files, and refuses otherwise with `Denied` naming what would be needed.
+
+use crate::core::error::{SysError, Gone};
+use crate::core::privilege::{Access, Privilege};
+use crate::core::support::Support;
+use crate::core::plan::{Plan, PlanStep};
+use crate::core::fsinfo::{
+    PathText, FileStat, EntryKind, DirEntry, EntryList, SpaceInfo, VolumeInfo, VolumeTable,
+};
+use crate::sys::fssys::{FsSys, FsWatcher};
+use crate::core::units::Bytes;
+use crate::sys::os::Os;
+
+/** Why making a link takes a privilege on Windows. */
+const WINDOWS_LINKS : string = "Windows lets only an administrator, or a user in developer mode, make links";
+
+/** What a folder and everything below it comes to. */
+pub class TreeSize {
+    /** The bytes the files take. */
+    pub bytes   : i64 = 0;
+
+    /** How many files. */
+    pub files   : i64 = 0;
+
+    /** How many folders, not counting the one asked about. */
+    pub folders : i64 = 0;
+
+    /** How many entries could not be read (gone meanwhile, or refused). Their size is not in `bytes`. */
+    pub skipped : i64 = 0;
+
+    /** One line: "613 files, 260 folders, 1.6 MiB, 2 unreadable". */
+    pub fn describe(self) : string {
+        let counts : string = self.files.toString() + " files, " + self.folders.toString() + " folders";
+        let skipped : string = self.skipped > 0 ? ", " + self.skipped.toString() + " unreadable" : "";
+        return counts + ", " + Bytes::human(self.bytes) + skipped;
+    }
+
+    /** Add what `other` found to this. */
+    pub fn plus(mut self, other : TreeSize) : void {
+        self.bytes = self.bytes + other.bytes;
+        self.files = self.files + other.files;
+        self.folders = self.folders + other.folders;
+        self.skipped = self.skipped + other.skipped;
+    }
+}
+
+/** Files and volumes. */
+pub class Fs {
+    /** What `path` is. A link is described as a link, not followed. */
+    pub static fn stat(path : string) : FileStat ! SysError {
+        return FsSys::stat(path);
+    }
+
+    /** Whether something is at `path` (a link counts, even if what it points to is gone). */
+    pub static fn exists(path : string) : bool ! SysError {
+        try {
+            FsSys::stat(path);
+            return true;
+        } catch e : Gone {
+            return false;
+        }
+    }
+
+    /** The entries of the folder `path`, each with its kind, size and time. */
+    pub static fn list(path : string) : EntryList ! SysError {
+        return FsSys::list(path);
+    }
+
+    /** The mounted volumes that hold files (on Linux the system's own pseudo-volumes are left out). */
+    pub static fn volumes() : VolumeTable ! SysError {
+        return FsSys::volumes(false);
+    }
+
+    /** Every mount, the system's own pseudo-volumes included. */
+    pub static fn allVolumes() : VolumeTable ! SysError {
+        return FsSys::volumes(true);
+    }
+
+    /** The volume `path` lies on. */
+    pub static fn volumeOf(path : string) : VolumeInfo ! SysError {
+        let all : VolumeTable = FsSys::volumes(true);
+        let at : i32 = all.holding(path);
+        if (at < 0) {
+            throw Gone("fs.volumeOf", "a volume holding " + path);
+        }
+        return all.at(at);
+    }
+
+    /** The room on the volume `path` lies on. */
+    pub static fn space(path : string) : SpaceInfo ! SysError {
+        return FsSys::space(path);
+    }
+
+    /**
+     * What the link at `path` points to, as written in the link (possibly relative). `Gone` when `path` is
+     * not a link.
+     */
+    pub static fn readLink(path : string) : string ! SysError {
+        return FsSys::readLink(path);
+    }
+
+    /**
+     * The bytes, files and folders at and below `path`. Links are counted as links and not followed, so a
+     * loop of them ends. A path that cannot be read counts as skipped; only the first, `path` itself, raises.
+     */
+    pub static fn treeSize(path : string) : TreeSize ! SysError {
+        let mut total : TreeSize = new TreeSize();
+        let items : EntryList = FsSys::list(path);
+        for (i of 0..items.size()) {
+            let entry : DirEntry = items.at(i);
+            match entry.stat.kind {
+                EntryKind::Dir => {
+                    total.folders = total.folders + 1;
+                    Fs::addBelow(total, PathText::join(path, entry.name, Os::separator()));
+                },
+                EntryKind::File => {
+                    total.files = total.files + 1;
+                    total.bytes = total.bytes + entry.stat.size;
+                },
+                _ => {},
+            }
+        }
+        return total;
+    }
+
+    /** Add to `total` what lies in the folder `path`, or count it as skipped when it cannot be read. */
+    static fn addBelow(mut total : TreeSize, path : string) : void {
+        try {
+            total.plus(Fs::treeSize(path));
+        } catch e : SysError {
+            total.skipped = total.skipped + 1;
+        }
+    }
+
+    /** Make `path` a symbolic link to `target`. */
+    pub static fn makeLink(target : string, path : string) : void ! SysError {
+        FsSys::makeLink(target, path);
+    }
+
+    /** Whether links can be made, so far as it can be known beforehand. */
+    pub static fn canMakeLink() : Support {
+        if (Os::name() == "windows") {
+            return Support::withPrivilege(Privilege::Elevated, WINDOWS_LINKS);
+        }
+        return Support::unknown("the folder's permissions decide");
+    }
+
+    /** What making the link would do. Nothing is done. */
+    pub static fn planMakeLink(target : string, path : string) : Plan {
+        let plan : Plan = new Plan("link " + path);
+        let step : string = "make " + path + " a symbolic link to " + target;
+        plan.add(new PlanStep(step, Access::Change, "delete the link " + path));
+        return plan;
+    }
+
+    /** Forbid or allow writing to `path`. */
+    pub static fn setReadOnly(path : string, readOnly : bool) : void ! SysError {
+        FsSys::setReadOnly(path, readOnly);
+    }
+
+    /** What changing the read-only flag would do. Nothing is done. */
+    pub static fn planSetReadOnly(path : string, readOnly : bool) : Plan {
+        let plan : Plan = new Plan((readOnly ? "protect " : "unprotect ") + path);
+        let forbid : string = "forbid writing to " + path;
+        let allow : string = "allow writing to " + path;
+        plan.add(
+            new PlanStep(readOnly ? forbid : allow, Access::Change, readOnly ? allow : forbid)
+        );
+        return plan;
+    }
+
+    /** Set the permission bits of `path` (0o755 and the like). `Unsupported` on Windows, which has none. */
+    pub static fn setMode(path : string, mode : i32) : void ! SysError {
+        FsSys::setMode(path, mode);
+    }
+
+    /** Whether permission bits can be set here. */
+    pub static fn canSetMode() : Support {
+        if (Os::name() == "windows") {
+            return Support::unsupported("Windows has no permission bits; use setReadOnly");
+        }
+        return Support::unknown("only the owner, or an elevated session, may");
+    }
+
+    /**
+     * Watch the folder `path` for changes to its entries (not those of its subfolders). Close it when done.
+     */
+    pub static fn watch(path : string) : FsWatcher ! SysError {
+        return FsSys::watch(path);
+    }
+}

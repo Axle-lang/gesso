@@ -1,0 +1,105 @@
+// sys/attrs — what Windows file attributes and drive types say, for the Windows file seam.
+
+use crate::core::error::SysError;
+use crate::core::fsinfo::{FileStat, EntryKind, VolumeInfo, VolumeKind};
+use crate::sys::errno::Errno;
+use crate::sys::filetime::FileTime;
+use crate::sys::kernel32::{
+    GetLastError, GetFileAttributesExW, GetVolumeInformationW, GetDriveTypeW, FAD_SIZE, FILEDATA_ATTRIBUTES,
+    FILEDATA_WRITE, FILEDATA_SIZE_HIGH, FILEDATA_SIZE_LOW, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_HIDDEN,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, DRIVE_REMOVABLE, DRIVE_REMOTE, DRIVE_CDROM,
+    DRIVE_RAMDISK,
+};
+use crate::raw::mem::Raw;
+use crate::raw::buf::Buf;
+use crate::raw::wide::Wide;
+
+/** The permission bits a folder reads as: rwxr-xr-x. */
+const MODE_FOLDER : i32 = 0x1ED;
+
+/** The permission bits a file reads as: rw-rw-rw-. */
+const MODE_FILE : i32 = 0x1B6;
+
+/** The write bits of a mode: w for the owner, the group and the others. */
+const MODE_WRITE : i32 = 0x92;
+
+/** Reading file attributes and drives. */
+pub class Attrs {
+    /** What `path` is, from the record `data` that `GetFileAttributesExW` or `FindNextFileW` wrote. */
+    pub static fn statOf(path : string, data : Buf) : FileStat {
+        let flags : i32 = data.i32At(FILEDATA_ATTRIBUTES);
+        let kind : EntryKind = Attrs::kindOf(flags);
+        let size : i64 = (data.u32At(FILEDATA_SIZE_HIGH) << 32) | data.u32At(FILEDATA_SIZE_LOW);
+        return new FileStat(
+            path,
+            kind,
+            size,
+            FileTime::millis(data.i64At(FILEDATA_WRITE)),
+            Attrs::modeOf(kind, flags),
+            (flags & FILE_ATTRIBUTE_HIDDEN) != 0
+        );
+    }
+
+    /** A reparse point is a link, whatever else it also is. */
+    static fn kindOf(flags : i32) : EntryKind {
+        if ((flags & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+            return EntryKind::Link;
+        }
+        return (flags & FILE_ATTRIBUTE_DIRECTORY) != 0 ? EntryKind::Dir : EntryKind::File;
+    }
+
+    /**
+     * Windows has no permission bits: the mode a plain file or folder would show, minus writing when the file
+     * is read-only.
+     */
+    static fn modeOf(kind : EntryKind, flags : i32) : i32 {
+        let base : i32 = kind == EntryKind::Dir ? MODE_FOLDER : MODE_FILE;
+        return (flags & FILE_ATTRIBUTE_READONLY) != 0 ? base - (base & MODE_WRITE) : base;
+    }
+
+    /** The kind of storage `GetDriveTypeW` says. */
+    pub static fn driveKind(driveType : i32) : VolumeKind {
+        return match driveType {
+            DRIVE_REMOVABLE => VolumeKind::Removable,
+            DRIVE_REMOTE => VolumeKind::Network,
+            DRIVE_CDROM => VolumeKind::Optical,
+            DRIVE_RAMDISK => VolumeKind::Ram,
+            _ => VolumeKind::Fixed,
+        };
+    }
+
+    /** The `WIN32_FILE_ATTRIBUTE_DATA` of `path`; raises why not, naming `op`. */
+    pub static fn read(op : string, path : string) : Buf ! SysError {
+        let name : Buf = Wide::alloc(path);
+        let data : Buf = new Buf(FAD_SIZE);
+        if (GetFileAttributesExW(name.ptr(), 0, data.ptr()) == 0) {
+            Errno::win32(op, path, GetLastError());
+        }
+        return data;
+    }
+
+    /** The drive whose root is `root`. */
+    pub static fn volumeAt(root : string) : VolumeInfo {
+        let rootBuf : Buf = Wide::alloc(root);
+        let label : Buf = new Buf(530);
+        let fsName : Buf = new Buf(530);
+        // A drive with no disc in it fails here; it is listed, with no label and no file system.
+        GetVolumeInformationW(
+            rootBuf.ptr(),
+            label.ptr(),
+            261,
+            Raw::nil(),
+            Raw::nil(),
+            Raw::nil(),
+            fsName.ptr(),
+            261
+        );
+        return new VolumeInfo(
+            root,
+            "",
+            Wide::read(label.ptr(), 261),
+            Wide::read(fsName.ptr(), 261),
+            Attrs::driveKind(GetDriveTypeW(rootBuf.ptr()))
+        );
+    }
+}

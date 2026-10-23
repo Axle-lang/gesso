@@ -1,0 +1,155 @@
+// sys/fssys — files and volumes, on Linux: `statx`, `statvfs`, `/proc/mounts`, `inotify`.
+//
+// `statx` answers a path's type, mode, size and modification time in one record whose layout is the
+// same on every architecture, and `AT_SYMLINK_NOFOLLOW` makes it describe a link itself. A folder is
+// watched with inotify: the descriptor is non-blocking and `poll` supplies the timeout, so `wait`
+// blocks for at most the time it is given. Only the folder's own entries are watched, not those of its
+// subfolders.
+
+use crate::core::error::{SysError, Gone};
+use crate::core::fsinfo::{PathText, FileStat, EntryKind, DirEntry, EntryList, SpaceInfo, VolumeTable};
+use crate::core::fsparse::MountText;
+use crate::core::fswatch::ChangeFeed;
+use crate::core::watch::{Watch, WatchState};
+use crate::sys::errno::Errno;
+use crate::sys::files::Files;
+use crate::sys::inotify::Inotify;
+use crate::sys::libc::{
+    statx, statvfs, symlink, chmod, poll, close, AT_FDCWD, AT_SYMLINK_NOFOLLOW, STATX_BASIC_STATS,
+    STATX_SIZE, STATX_MODE, STATX_FILESIZE, STATX_MTIME_SEC, STATX_MTIME_NSEC, STATVFS_SIZE, STATVFS_FRSIZE,
+    STATVFS_BLOCKS, STATVFS_BFREE, STATVFS_BAVAIL,
+};
+use crate::raw::buf::Buf;
+use crate::raw::wide::Narrow;
+
+/** The permission bits of a mode: the nine of rwxrwxrwx and setuid, setgid and sticky. */
+const MODE_BITS : i32 = 0xFFF;
+
+/** A watch on one folder. */
+pub class FsWatcher : ChangeFeed, Watch {
+    handle : Inotify;
+
+    /** A watcher over `handle`. */
+    constructor(own handle : Inotify) {
+        super();
+        self.handle = handle;
+    }
+    pub fn wait(mut self, timeoutMs : i32) : WatchState ! SysError {
+        let standing : WatchState = self.standing();
+        if (standing != WatchState::Idle) {
+            return standing;
+        }
+        return self.handle.poll(timeoutMs, self.queue);
+    }
+    pub fn close(mut self) : void {
+        if (self.isOpen()) {
+            self.handle.close();
+            self.markClosed();
+        }
+    }
+}
+
+/** Files and volumes. */
+pub class FsSys {
+    /** What `path` is; a link is described, not followed. */
+    pub static fn stat(path : string) : FileStat ! SysError {
+        let name : Buf = Narrow::alloc(path);
+        let rec : Buf = new Buf(STATX_SIZE);
+        if (statx(AT_FDCWD, name.ptr(), AT_SYMLINK_NOFOLLOW, STATX_BASIC_STATS, rec.ptr()) != 0) {
+            Errno::posix("fs.stat", path, Files::errno());
+        }
+        let mode : i32 = rec.u16At(STATX_MODE);
+        let millis : i64 = rec.i64At(
+            STATX_MTIME_SEC
+        ) * 1000 + rec.u32At(STATX_MTIME_NSEC) / 1000000;
+        return new FileStat(
+            path,
+            EntryKind::fromMode(mode),
+            rec.i64At(STATX_FILESIZE),
+            millis,
+            mode & MODE_BITS,
+            MountText::isHidden(PathText::leaf(path))
+        );
+    }
+
+    /**
+     * The entries of the folder `path`, each described. An entry that goes away while the folder is read is
+     * left out.
+     */
+    pub static fn list(path : string) : EntryList ! SysError {
+        let names : string[] = Files::names("fs.list", path);
+        let out : EntryList = new EntryList();
+        for (i of 0..names.length) {
+            try {
+                out.add(new DirEntry(names[i], FsSys::stat(PathText::join(path, names[i], "/"))));
+            } catch e : Gone {
+                // Deleted since the folder was read.
+            }
+        }
+        return out;
+    }
+
+    /** The mounted volumes; `all` includes the ones that are not storage (proc, sysfs). */
+    pub static fn volumes(all : bool) : VolumeTable ! SysError {
+        let table : VolumeTable = new VolumeTable();
+        MountText::parse(Files::slurp("fs.volumes", "/proc/mounts"), all, table);
+        return table;
+    }
+
+    /** The room on the volume that holds `path`. */
+    pub static fn space(path : string) : SpaceInfo ! SysError {
+        let name : Buf = Narrow::alloc(path);
+        let rec : Buf = new Buf(STATVFS_SIZE);
+        if (statvfs(name.ptr(), rec.ptr()) != 0) {
+            Errno::posix("fs.space", path, Files::errno());
+        }
+        let unit : i64 = rec.i64At(STATVFS_FRSIZE);
+        return new SpaceInfo(
+            rec.i64At(STATVFS_BLOCKS) * unit,
+            rec.i64At(STATVFS_BFREE) * unit,
+            rec.i64At(STATVFS_BAVAIL) * unit
+        );
+    }
+
+    /** Where the link `path` points. */
+    pub static fn readLink(path : string) : string ! SysError {
+        let st : FileStat = FsSys::stat(path);
+        if (!st.isLink()) {
+            throw Gone("fs.readLink", path + " is not a link");
+        }
+        return Files::linkOf(path);
+    }
+
+    /** Make `path` a symbolic link to `target`. */
+    pub static fn makeLink(target : string, path : string) : void ! SysError {
+        let t : Buf = Narrow::alloc(target);
+        let p : Buf = Narrow::alloc(path);
+        if (symlink(t.ptr(), p.ptr()) != 0) {
+            Errno::posix("fs.makeLink", path, Files::errno());
+        }
+    }
+
+    /** Forbid or allow writing by the owner. */
+    pub static fn setReadOnly(path : string, readOnly : bool) : void ! SysError {
+        let st : FileStat = FsSys::stat(path);
+        let p : Buf = Narrow::alloc(path);
+        let mode : i32 = st.mode - (st.mode & 0x92);
+        let next : i32 = readOnly ? mode : (st.mode | 0x80);
+        if (chmod(p.ptr(), next) != 0) {
+            Errno::posix("fs.setReadOnly", path, Files::errno());
+        }
+    }
+
+    /** Set the permission bits of `path` (the nine of rwxrwxrwx). */
+    pub static fn setMode(path : string, mode : i32) : void ! SysError {
+        let p : Buf = Narrow::alloc(path);
+        if (chmod(p.ptr(), mode & MODE_BITS) != 0) {
+            Errno::posix("fs.setMode", path, Files::errno());
+        }
+    }
+
+    /** Watch the folder `path` for changes to its entries. */
+    pub static fn watch(path : string) : FsWatcher ! SysError {
+        return new FsWatcher(Inotify::open(path));
+    }
+}

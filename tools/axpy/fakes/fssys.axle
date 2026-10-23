@@ -1,0 +1,101 @@
+// fakes/fssys — the `sys::fssys` seam as the tests see it: a small fixed disk.
+//
+// The same public shape as the two ports. The tree is
+//
+//     /data            folder
+//     /data/a.txt      file, 100 bytes
+//     /data/b.bin      file, 1000 bytes, read-only
+//     /data/.hidden    file, 5 bytes
+//     /data/sub        folder
+//     /data/sub/c.txt  file, 20 bytes
+//     /data/lnk        link to a.txt
+//
+// and two volumes, / and /data.
+
+use crate::core::error::{SysError, Gone, Unsupported};
+use crate::core::fsinfo::{
+    FileStat, EntryKind, DirEntry, EntryList, SpaceInfo, VolumeInfo, VolumeTable, VolumeKind,
+};
+use crate::core::fswatch::{ChangeKind, ChangeFeed};
+use crate::core::watch::{Watch, WatchState};
+
+/** A watcher that has three changes to report, once. */
+pub class FsWatcher : ChangeFeed, Watch {
+    constructor() {
+        super();
+        self.queue.push(ChangeKind::Created, "new.txt");
+        self.queue.push(ChangeKind::Modified, "a.txt");
+        self.queue.push(ChangeKind::Deleted, "old.txt");
+    }
+    pub fn wait(mut self, timeoutMs : i32) : WatchState ! SysError {
+        return self.standing();
+    }
+    pub fn close(mut self) : void {
+        self.markClosed();
+    }
+}
+
+/** A disk that is always the same. */
+pub class FsSys {
+    pub static fn stat(path : string) : FileStat ! SysError {
+        if (path == "/data") {
+            return new FileStat(path, EntryKind::Dir, 4096, 1000, 0x1ED, false);
+        }
+        if (path == "/data/sub") {
+            return new FileStat(path, EntryKind::Dir, 4096, 2000, 0x1ED, false);
+        }
+        if (path == "/data/a.txt") {
+            return new FileStat(path, EntryKind::File, 100, 3000, 0x1A4, false);
+        }
+        if (path == "/data/b.bin") {
+            return new FileStat(path, EntryKind::File, 1000, 4000, 0x124, false);
+        }
+        if (path == "/data/.hidden") {
+            return new FileStat(path, EntryKind::File, 5, 5000, 0x1A4, true);
+        }
+        if (path == "/data/sub/c.txt") {
+            return new FileStat(path, EntryKind::File, 20, 6000, 0x1A4, false);
+        }
+        if (path == "/data/lnk") {
+            return new FileStat(path, EntryKind::Link, 10, 7000, 0x1FF, false);
+        }
+        throw Gone("fs.stat", path);
+    }
+    pub static fn list(path : string) : EntryList ! SysError {
+        let out : EntryList = new EntryList();
+        if (path == "/data") {
+            out.add(new DirEntry("a.txt", FsSys::stat("/data/a.txt")));
+            out.add(new DirEntry("b.bin", FsSys::stat("/data/b.bin")));
+            out.add(new DirEntry(".hidden", FsSys::stat("/data/.hidden")));
+            out.add(new DirEntry("sub", FsSys::stat("/data/sub")));
+            out.add(new DirEntry("lnk", FsSys::stat("/data/lnk")));
+            return out;
+        }
+        if (path == "/data/sub") {
+            out.add(new DirEntry("c.txt", FsSys::stat("/data/sub/c.txt")));
+            return out;
+        }
+        throw Gone("fs.list", path);
+    }
+    pub static fn volumes(all : bool) : VolumeTable ! SysError {
+        let t : VolumeTable = new VolumeTable();
+        t.add(new VolumeInfo("/", "/dev/sda1", "", "ext4", VolumeKind::Fixed));
+        t.add(new VolumeInfo("/data", "/dev/sdb1", "Data", "ext4", VolumeKind::Fixed));
+        return t;
+    }
+    pub static fn space(path : string) : SpaceInfo ! SysError {
+        return new SpaceInfo(1000000, 400000, 350000);
+    }
+    pub static fn readLink(path : string) : string ! SysError {
+        if (path == "/data/lnk") {
+            return "a.txt";
+        }
+        throw Gone("fs.readLink", path);
+    }
+    pub static fn makeLink(target : string, path : string) : void ! SysError {}
+    pub static fn setReadOnly(path : string, readOnly : bool) : void ! SysError {}
+    pub static fn setMode(path : string, mode : i32) : void ! SysError {}
+    pub static fn watch(path : string) : FsWatcher ! SysError {
+        return new FsWatcher();
+    }
+}

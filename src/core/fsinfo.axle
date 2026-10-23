@@ -1,0 +1,438 @@
+// fsinfo — files and volumes as readings: what a path is, how big, when it changed; what a drive holds.
+//
+// Like every reading in the library these are copies of what the system said at one moment. Times are
+// milliseconds since 1970 (UTC), sizes are bytes, and a field the platform has no word for reads as
+// 0 or empty and says so in its documentation rather than inventing a value.
+
+use crate::core::ident::Key;
+use crate::core::list::{List, Copy};
+use crate::core::text::Utf8;
+use crate::core::units::Bytes;
+
+/** What a path is. */
+pub enum EntryKind : i32 {
+    File = 0,
+    Dir = 1,
+
+    /**
+     * A symbolic link, or on Windows any reparse point that is not a mount (a junction too). The link itself,
+     * not what it points to.
+     */
+    Link = 2,
+
+    /** A device, a socket, a pipe. */
+    Other = 3,
+
+    /** The kind the type bits of a POSIX `mode` say. */
+    pub static fn fromMode(mode : i32) : EntryKind {
+        return match mode & 0xF000 {
+            0x8000 => EntryKind::File,
+            0x4000 => EntryKind::Dir,
+            0xA000 => EntryKind::Link,
+            _ => EntryKind::Other,
+        };
+    }
+
+    /** Its name: "file", "folder". */
+    pub fn label(self) : string {
+        return match self {
+            EntryKind::File => "file",
+            EntryKind::Dir => "folder",
+            EntryKind::Link => "link",
+            EntryKind::Other => "other",
+        };
+    }
+}
+
+/** Paths, as text. */
+pub class PathText {
+    /**
+     * The path of `name` in the folder `dir`, the two joined by `sep` unless `dir` already ends in a
+     * separator.
+     */
+    pub static fn join(dir : string, name : string, sep : string) : string {
+        let last : i32 = dir.byteLength > 0 ? dir.byteAt(dir.byteLength - 1) : 0;
+        if (last == 47 || last == 92) {
+            return dir + name;
+        }
+        return dir + sep + name;
+    }
+
+    /** The last part of `path`, whichever separator it uses. */
+    pub static fn leaf(path : string) : string {
+        let mut i : i64 = path.byteLength - 1;
+        while (i >= 0 && path.byteAt(i) != 47 && path.byteAt(i) != 92) {
+            i = i - 1;
+        }
+        return Utf8::slice(path, i + 1, path.byteLength);
+    }
+}
+
+/** Permission bits as POSIX writes them, and how they read. */
+pub class Mode {
+    /** The nine bits as text: 0o755 is "rwxr-xr-x". */
+    pub static fn text(mode : i32) : string {
+        let letters : string = "rwxrwxrwx";
+        let mut s : string = "";
+        let mut i : i32 = 0;
+        while (i < 9) {
+            let on : bool = ((mode >> (8 - i)) & 1) == 1;
+            s = s + (on ? Utf8::slice(letters, i as i64, (i + 1) as i64) : "-");
+            i = i + 1;
+        }
+        return s;
+    }
+
+    /** Whether the owner may write. */
+    pub static fn ownerWrites(mode : i32) : bool {
+        return (mode & 0x80) != 0;
+    }
+
+    /** The mode with every write bit cleared, or the owner's write bit set. */
+    pub static fn withWrite(mode : i32, writable : bool) : i32 {
+        if (writable) {
+            return mode | 0x80;
+        }
+        return mode - (mode & 0x92);
+    }
+}
+
+/** What one path is. */
+pub class FileStat : Copy<FileStat> {
+    /** Where it is, as it was asked for. */
+    pub path     : string;
+
+    /** What it is. A link is reported as a link, not as what it points to. */
+    pub kind     : EntryKind;
+
+    /** Its size in bytes; for a folder, what the system says (not the size of its contents). */
+    pub size     : i64;
+
+    /** When its content last changed, milliseconds since 1970. */
+    pub modified : i64;
+
+    /** The permission bits (Linux), or 0o444 / 0o666 made from the read-only attribute (Windows). */
+    pub mode     : i32;
+
+    /** Whether it cannot be written by its owner. */
+    pub readOnly : bool;
+
+    /** Whether a file browser hides it: a leading dot (Linux), the hidden attribute (Windows). */
+    pub hidden   : bool;
+
+    /** The same for the same file across readings: its place, not its content. */
+    pub key      : i64;
+
+    /**
+     * A reading of `path` that is a `kind` of `size` bytes, changed at `modified`, with permissions `mode`.
+     */
+    constructor(
+        path : string,
+        kind : EntryKind,
+        size : i64,
+        modified : i64,
+        mode : i32,
+        hidden : bool
+    ) {
+        self.path = path;
+        self.kind = kind;
+        self.size = size;
+        self.modified = modified;
+        self.mode = mode;
+        self.readOnly = !Mode::ownerWrites(mode);
+        self.hidden = hidden;
+        self.key = Key::ofText(path);
+    }
+
+    /** A separate object with the same reading. */
+    pub fn copy(self) : FileStat {
+        return new FileStat(self.path, self.kind, self.size, self.modified, self.mode, self.hidden);
+    }
+
+    /** Whether it is a folder. */
+    pub fn isDir(self) : bool {
+        return self.kind == EntryKind::Dir;
+    }
+
+    /** Whether it is a link. */
+    pub fn isLink(self) : bool {
+        return self.kind == EntryKind::Link;
+    }
+}
+
+/** One name in a folder, with what it is. */
+pub class DirEntry : Copy<DirEntry> {
+    /** The name, without its folder. */
+    pub name : string;
+
+    /** What it is and how big. */
+    pub stat : FileStat;
+
+    /** An entry called `name` in the folder `dir`, as `stat` read it. */
+    constructor(name : string, own stat : FileStat) {
+        self.name = name;
+        self.stat = stat;
+    }
+
+    /** One line: "notes.txt  file  1.2 KiB  rw-r--r--". */
+    pub fn describe(self) : string {
+        return self.name + "  " + self.stat.kind.label() + "  " + Bytes::human(
+            self.stat.size
+        ) + "  " + Mode::text(self.stat.mode);
+    }
+
+    /** A separate object with the same reading. */
+    pub fn copy(self) : DirEntry {
+        return new DirEntry(self.name, self.stat.copy());
+    }
+}
+
+/** The entries of a folder. */
+pub class EntryList {
+    rows : List<DirEntry>;
+
+    /** An empty list. */
+    constructor() {
+        self.rows = new List<DirEntry>();
+    }
+
+    /** Add `entry` at the end; the list takes it over. */
+    pub fn add(mut self, own entry : DirEntry) : void {
+        self.rows.add(entry);
+    }
+
+    /** How many entries there are. */
+    pub fn size(self) : i32 {
+        return self.rows.size();
+    }
+
+    /** The entry at position `i`. */
+    pub fn at(self, i : i32) : DirEntry {
+        return self.rows.at(i);
+    }
+
+    /** One line: "13 entries, 7 folders, 18.4 KiB in files". */
+    pub fn describe(self) : string {
+        let counts : string = self.size().toString() + " entries, " + self.folders().toString() + " folders";
+        return counts + ", " + Bytes::human(self.bytes()) + " in files";
+    }
+
+    /** The position of the entry called `name`, or -1. */
+    pub fn find(self, name : string) : i32 {
+        for (i of 0..self.size()) {
+            if (self.at(i).name == name) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** How many are folders. */
+    pub fn folders(self) : i32 {
+        let mut n : i32 = 0;
+        for (i of 0..self.size()) {
+            if (self.at(i).stat.isDir()) {
+                n = n + 1;
+            }
+        }
+        return n;
+    }
+
+    /** The bytes the files in this list take together (folders and links count 0). */
+    pub fn bytes(self) : i64 {
+        let mut sum : i64 = 0;
+        for (i of 0..self.size()) {
+            if (self.at(i).stat.kind == EntryKind::File) {
+                sum = sum + self.at(i).stat.size;
+            }
+        }
+        return sum;
+    }
+}
+
+/** How much room a volume has. */
+pub class SpaceInfo {
+    /** The size of the volume. */
+    pub total     : i64;
+
+    /** What is unused, including what only a privileged user may take. */
+    pub unused    : i64;
+
+    /** What this user can use: the part of `unused` that is not kept back. */
+    pub available : i64;
+
+    /** The space of a volume of `total` bytes with `unused` free and `available` to this user. */
+    constructor(total : i64, unused : i64, available : i64) {
+        self.total = total;
+        self.unused = unused;
+        self.available = available;
+    }
+
+    /** One line: "6.3 GiB free of 837.5 GiB". */
+    pub fn describe(self) : string {
+        return Bytes::human(self.unused) + " free of " + Bytes::human(self.total);
+    }
+
+    /** The bytes in use. */
+    pub fn used(self) : i64 {
+        return self.total - self.unused;
+    }
+
+    /** How full it is, in tenths of a percent (0 to 1000), of what this user can use. */
+    pub fn fullTenths(self) : i64 {
+        let usable : i64 = self.used() + self.available;
+        if (usable <= 0) {
+            return 0;
+        }
+        return (self.used() * 1000) / usable;
+    }
+}
+
+/** What kind of storage a volume is. */
+pub enum VolumeKind : i32 {
+    /** A disk inside the machine. */
+    Fixed = 0,
+
+    /** A drive that can be taken away. */
+    Removable = 1,
+
+    /** Reached over the network: NFS, SMB, SSHFS. */
+    Network = 2,
+
+    /** A disc. */
+    Optical = 3,
+
+    /** Held in memory: tmpfs. */
+    Ram = 4,
+
+    /** Not storage: proc, sysfs, devpts and the like. A listing leaves these out unless asked. */
+    Virtual = 5,
+
+    /** Its name. */
+    pub fn label(self) : string {
+        return match self {
+            VolumeKind::Fixed => "disk",
+            VolumeKind::Removable => "removable",
+            VolumeKind::Network => "network",
+            VolumeKind::Optical => "optical",
+            VolumeKind::Ram => "memory",
+            VolumeKind::Virtual => "virtual",
+        };
+    }
+}
+
+/** A mounted volume. */
+pub class VolumeInfo : Copy<VolumeInfo> {
+    /** Where it is reached: "/home", "C:\". */
+    pub root   : string;
+
+    /**
+     * The device or share behind it: "/dev/nvme0n1p2", "\\server\share"; empty when the system gives none.
+     */
+    pub device : string;
+
+    /** The name its owner gave it; empty if none. */
+    pub label  : string;
+
+    /** The file system: "ext4", "NTFS". */
+    pub fsType : string;
+
+    /** What kind of storage it is. */
+    pub kind   : VolumeKind;
+
+    /** The same for the same volume across readings. */
+    pub key    : i64;
+
+    /** A volume reached at `root`, of `fsType`, on `device`, called `label`, of `kind`. */
+    constructor(
+        root : string,
+        device : string,
+        label : string,
+        fsType : string,
+        kind : VolumeKind
+    ) {
+        self.root = root;
+        self.device = device;
+        self.label = label;
+        self.fsType = fsType;
+        self.kind = kind;
+        self.key = Key::ofText(root);
+    }
+
+    /** A separate object with the same reading. */
+    pub fn copy(self) : VolumeInfo {
+        return new VolumeInfo(self.root, self.device, self.label, self.fsType, self.kind);
+    }
+
+    /** One line: "C:\\  NTFS (disk)". */
+    pub fn describe(self) : string {
+        return self.title() + "  " + self.fsType + " (" + self.kind.label() + ")";
+    }
+
+    /** A person's name for it: its label, else its root. */
+    pub fn title(self) : string {
+        return self.label.byteLength > 0 ? self.label : self.root;
+    }
+}
+
+/** The mounted volumes. */
+pub class VolumeTable {
+    rows : List<VolumeInfo>;
+
+    /** An empty list. */
+    constructor() {
+        self.rows = new List<VolumeInfo>();
+    }
+
+    /** Add `volume` at the end; the list takes it over. */
+    pub fn add(mut self, own volume : VolumeInfo) : void {
+        self.rows.add(volume);
+    }
+
+    /** How many volumes there are. */
+    pub fn size(self) : i32 {
+        return self.rows.size();
+    }
+
+    /** The volume at position `i`. */
+    pub fn at(self, i : i32) : VolumeInfo {
+        return self.rows.at(i);
+    }
+
+    /**
+     * Whether `root` is a folder-boundary prefix of `path`: "/home" holds "/home/a" but not "/homework"; a
+     * drive root such as "C:\\" is compared without regard to case.
+     */
+    pub(file) static fn within(path : string, root : string) : bool {
+        let n : i64 = root.byteLength;
+        if (n == 0 || path.byteLength < n) {
+            return false;
+        }
+        let head : string = Utf8::slice(path, 0, n);
+        let drive : bool = n >= 2 && root.byteAt(1) == 58;
+        if (!(drive ? Utf8::sameFolded(head, root) : head == root)) {
+            return false;
+        }
+        let last : i32 = root.byteAt(n - 1);
+        if (last == 47 || last == 92 || path.byteLength == n) {
+            return true;
+        }
+        let next : i32 = path.byteAt(n);
+        return next == 47 || next == 92;
+    }
+
+    /**
+     * The position of the volume `path` lies on: the one with the longest root that holds it; -1 when none.
+     */
+    pub fn holding(self, path : string) : i32 {
+        let mut best : i32 = -1;
+        for (i of 0..self.size()) {
+            if (VolumeTable::within(path, self.at(i).root)) {
+                if (best < 0 || self.at(i).root.byteLength > self.at(best).root.byteLength) {
+                    best = i;
+                }
+            }
+        }
+        return best;
+    }
+}

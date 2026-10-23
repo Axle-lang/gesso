@@ -1,0 +1,172 @@
+// fswatch — what a folder watcher reports, and the queue it keeps between the system's readings.
+//
+// The system delivers changes in batches; a program takes them one at a time. A watcher reads a batch
+// into a `ChangeQueue` when `wait` says something is ready, and `next()` hands them out in order.
+// If the system dropped events (its buffer overflowed), `wait` answers `WatchState::Lost` and the queue
+// is empty: the watcher does not guess what changed, and the program reads the folder again.
+
+use crate::core::watch::WatchState;
+
+/** What happened to a name in a watched folder. */
+pub enum ChangeKind : i32 {
+    /** A file or folder appeared. */
+    Created = 0,
+
+    /** One went away. */
+    Deleted = 1,
+
+    /** Its content or its attributes changed. */
+    Modified = 2,
+
+    /** It was renamed or moved: the name it had. */
+    RenamedFrom = 3,
+
+    /** It was renamed or moved: the name it has now (follows `RenamedFrom` when both are in the folder). */
+    RenamedTo = 4,
+
+    /** The kind at position `n` of the list above; anything outside is `Modified`. */
+    pub static fn at(n : i32) : ChangeKind {
+        return match n {
+            0 => ChangeKind::Created,
+            1 => ChangeKind::Deleted,
+            3 => ChangeKind::RenamedFrom,
+            4 => ChangeKind::RenamedTo,
+            _ => ChangeKind::Modified,
+        };
+    }
+
+    /** Its name in a sentence. */
+    pub fn label(self) : string {
+        return match self {
+            ChangeKind::Created => "created",
+            ChangeKind::Deleted => "deleted",
+            ChangeKind::Modified => "modified",
+            ChangeKind::RenamedFrom => "renamed from",
+            ChangeKind::RenamedTo => "renamed to",
+        };
+    }
+}
+
+/** One change. */
+pub class FsChange {
+    /** What happened. */
+    pub kind : ChangeKind;
+
+    /** To which name, relative to the watched folder. */
+    pub name : string;
+
+    /** A change `kind` of `name`. */
+    constructor(kind : ChangeKind, name : string) {
+        self.kind = kind;
+        self.name = name;
+    }
+
+    /** One line: "created notes.txt". */
+    pub fn describe(self) : string {
+        return self.kind.label() + " " + self.name;
+    }
+}
+
+/** Changes waiting to be taken, first in, first out. */
+pub class ChangeQueue {
+    kinds : i32[];
+    names : string[];
+    first : i32 = 0;
+    used  : i32 = 0;
+    room  : i32;
+
+    /** An empty queue. */
+    constructor() {
+        self.room = 32;
+        self.kinds = malloc<i32>(self.room as i64);
+        self.names = malloc<string>(self.room as i64);
+    }
+
+    /** Put a change at the end. */
+    pub fn push(mut self, kind : ChangeKind, name : string) : void {
+        if (self.used == self.room) {
+            let mut moreKinds : i32[] = malloc<i32>((self.room * 2) as i64);
+            let mut moreNames : string[] = malloc<string>((self.room * 2) as i64);
+            for (i of 0..self.used) {
+                moreKinds[i as i64] = self.kinds[((self.first + i) % self.room) as i64];
+                moreNames[i as i64] = self.names[((self.first + i) % self.room) as i64];
+            }
+            self.kinds = moreKinds;
+            self.names = moreNames;
+            self.first = 0;
+            self.room = self.room * 2;
+        }
+        let at : i32 = (self.first + self.used) % self.room;
+        self.kinds[at as i64] = kind as i32;
+        self.names[at as i64] = name;
+        self.used = self.used + 1;
+    }
+
+    /** How many are waiting. */
+    pub fn count(self) : i32 {
+        return self.used;
+    }
+
+    /** Whether none is waiting. */
+    pub fn isEmpty(self) : bool {
+        return self.used == 0;
+    }
+
+    /**
+     * Take the oldest change; an empty queue answers a modification of the empty name, so check `isEmpty`
+     * first.
+     */
+    pub fn pop(mut self) : FsChange {
+        if (self.used == 0) {
+            return new FsChange(ChangeKind::Modified, "");
+        }
+        let kind : i32 = self.kinds[self.first as i64];
+        let name : string = self.names[self.first as i64];
+        self.first = (self.first + 1) % self.room;
+        self.used = self.used - 1;
+        return new FsChange(ChangeKind::at(kind), name);
+    }
+}
+
+/**
+ * What every folder watcher keeps: the changes it has read and whether it is still open. A port's watcher
+ * extends it and fills `queue`.
+ */
+pub class ChangeFeed {
+    /** The changes read and not yet taken. */
+    pub queue : ChangeQueue;
+    live      : bool = true;
+
+    /** A feed with nothing in it. */
+    constructor() {
+        self.queue = new ChangeQueue();
+    }
+
+    /** The answer that needs no asking: `Closed`, `Ready` when changes are waiting, `Idle` when neither. */
+    pub fn standing(self) : WatchState {
+        if (!self.live) {
+            return WatchState::Closed;
+        }
+        return self.queue.isEmpty() ? WatchState::Idle : WatchState::Ready;
+    }
+
+    /** Note that the watcher was closed. */
+    pub fn markClosed(mut self) : void {
+        self.live = false;
+    }
+
+    /** Whether the watcher is still open. */
+    pub fn isOpen(self) : bool {
+        return self.live;
+    }
+
+    /** The oldest change not yet taken; check `pending` first. */
+    pub fn next(mut self) : FsChange {
+        return self.queue.pop();
+    }
+
+    /** How many changes are waiting. */
+    pub fn pending(self) : i32 {
+        return self.queue.count();
+    }
+}
