@@ -1,0 +1,126 @@
+// sys/procrecords — process handles and the records `NtQuerySystemInformation` writes, for the Windows
+// process seam.
+
+use crate::core::list::List;
+use crate::core::process::{ProcInfo, Signal};
+use crate::core::error::{SysError, Gone, OsFailure};
+use crate::sys::errno::Errno;
+use crate::sys::kernel32::{
+    GetLastError, CloseHandle, OpenProcess, TerminateProcess, PROCESS_TERMINATE, PROCESS_SUSPEND_RESUME,
+};
+use crate::sys::ntdll::{
+    NtQuerySystemInformation, NtSuspendProcess, NtResumeProcess, SYSTEM_PROCESS_INFORMATION,
+    STATUS_INFO_LENGTH_MISMATCH, SPI_NEXT, SPI_THREADS, SPI_CREATE, SPI_NAME_LEN, SPI_NAME_BUF, SPI_PID,
+    SPI_PARENT, SPI_WORKING_SET,
+};
+use crate::sys::filetime::FileTime;
+use crate::raw::mem::Raw;
+use crate::raw::buf::Buf;
+use crate::raw::wide::Wide;
+
+/** The first buffer for the process table: a thousand processes or so. */
+const INITIAL_BYTES : i64 = 1048576;
+
+/** How much more than it asked for the table gets, for the processes that start meanwhile. */
+const HEADROOM_BYTES : i64 = 65536;
+
+/** How many times the table is asked for again after the system says the buffer was short. */
+const PROC_TRIES : i32 = 8;
+
+/** Process handles and the process table's records. */
+pub class ProcRecords {
+    /** The handle for `pid` opened with `access`; raises why not. */
+    pub static fn open(op : string, pid : i64, access : i32) : ptr ! SysError {
+        let h : ptr = OpenProcess(access, 0, pid as i32);
+        if (Raw::isNil(h)) {
+            let code : i32 = GetLastError();
+            if (code == 87) {
+                throw Gone(op, ProcInfo::label(pid));
+            }
+            Errno::win32(op, ProcInfo::label(pid), code);
+        }
+        return h;
+    }
+
+    /** The name in the record at `rec`; the idle process has none, and is named. */
+    pub static fn nameOf(rec : ptr, pid : i64) : string {
+        let bytes : i32 = Raw::u16At(rec, SPI_NAME_LEN);
+        let text : ptr = Raw::ptrAt(rec, SPI_NAME_BUF);
+        if (bytes == 0 || Raw::isNil(text)) {
+            return pid == 0 ? "System Idle Process" : "";
+        }
+        return Wide::readN(text, bytes / 2);
+    }
+
+    /** The records in `table`, which `used` bytes of were written. */
+    pub static fn parse(table : Buf, used : i64) : ProcInfo[] {
+        let found : List<ProcInfo> = new List<ProcInfo>();
+        let mut at : i64 = 0;
+        let mut more : bool = used > 0;
+        while (more) {
+            let pid : i64 = table.i64At(at + SPI_PID);
+            found.add(
+                new ProcInfo(
+                    pid,
+                    table.i64At(at + SPI_PARENT),
+                    ProcRecords::nameOf(Raw::plus(table.ptr(), at), pid),
+                    table.u32At(at + SPI_THREADS) as i32,
+                    FileTime::millis(table.i64At(at + SPI_CREATE)),
+                    table.i64At(at + SPI_WORKING_SET)
+                )
+            );
+            let next : i64 = table.u32At(at + SPI_NEXT);
+            more = next > 0 && at + next < used;
+            at = at + next;
+        }
+        return found.toArray();
+    }
+
+    /**
+     * The process table, as `NtQuerySystemInformation` writes it, asked for with a buffer that grows until it
+     * is big enough.
+     */
+    pub static fn snapshot() : ProcInfo[] ! SysError {
+        let table : Buf = new Buf(INITIAL_BYTES);
+        let got : Buf = new Buf(4);
+        let mut status : i32 = STATUS_INFO_LENGTH_MISMATCH;
+        for (attempt of 0..PROC_TRIES) {
+            status = NtQuerySystemInformation(
+                SYSTEM_PROCESS_INFORMATION,
+                table.ptr(),
+                table.size() as i32,
+                got.ptr()
+            );
+            if (status != STATUS_INFO_LENGTH_MISMATCH) {
+                break;
+            }
+            // Room for the size it asked for, and for the processes that start meanwhile.
+            table.fit(got.u32At(0) + HEADROOM_BYTES);
+        }
+        if (status < 0) {
+            throw OsFailure("proc.list", status, "NTSTATUS");
+        }
+        return ProcRecords::parse(table, got.u32At(0));
+    }
+
+    /** End process `pid`, as `sig` (`Terminate` or `Kill`) asks. */
+    pub static fn terminate(pid : i64, sig : Signal) : void ! SysError {
+        let h : ptr = ProcRecords::open("proc.signal", pid, PROCESS_TERMINATE);
+        let ok : i32 = TerminateProcess(h, 1);
+        let code : i32 = GetLastError();
+        CloseHandle(h);
+        if (ok == 0) {
+            Errno::win32("proc.signal", ProcInfo::label(pid) + " (" + sig.label() + ")", code);
+        }
+    }
+
+    /** Freeze process `pid`, or let it go on. */
+    pub static fn freeze(pid : i64, frozen : bool) : void ! SysError {
+        let h : ptr = ProcRecords::open("proc.signal", pid, PROCESS_SUSPEND_RESUME);
+        let status : i32 = frozen ? NtSuspendProcess(h) : NtResumeProcess(h);
+        CloseHandle(h);
+        if (status < 0) {
+            throw OsFailure("proc.signal", status, "NTSTATUS");
+        }
+    }
+}

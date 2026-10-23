@@ -1,0 +1,143 @@
+// procs — the processes of the machine: list them, find them, see their shape, and act on them.
+//
+//     let tree : ProcTree = Procs::tree();
+//     for (row of 0..tree.size()) { … tree.infoAt(row), tree.depthAt(row) … }
+//
+//     if (Procs::canSetPriority(Priority::High).usableBy(Host::privilege())) {
+//         Procs::setPriority(pid, Priority::High);
+//     }
+//
+// Reading the table is `Access::Read` and needs no privilege. Acting on a process is `Access::Change`:
+// the system lets a user act on their own processes and refuses the others, which arrives as `Denied`
+// naming the elevated session that would be needed — never as a bare failure, and never silently.
+// `can…` says beforehand what is known; `plan…` says what an action would do and how to put it back.
+//
+// A process is read at one moment: its id may be reused later. Hold on to `ProcInfo::key`, which folds in
+// the start time, to tell "the same process" from "another one with the same number".
+
+use crate::core::process::{ProcInfo, Priority, Signal};
+use crate::core::privilege::{Access, Privilege};
+use crate::core::support::Support;
+use crate::core::plan::{Plan, PlanStep};
+use crate::core::error::{SysError, Gone};
+use crate::core::list::List;
+use crate::core::text::Utf8;
+use crate::sys::procsys::ProcSys;
+use crate::sys::os::Os;
+use crate::proc::tree::ProcTree;
+
+/** The machine's processes. */
+pub class Procs {
+    /** Every process, as of now. */
+    pub static fn list() : ProcInfo[] ! SysError {
+        return ProcSys::list();
+    }
+
+    /** Every process, with its place among the others. */
+    pub static fn tree() : ProcTree ! SysError {
+        return new ProcTree(ProcSys::list());
+    }
+
+    /** The process `pid`; `Gone` when there is none. */
+    pub static fn get(pid : i64) : ProcInfo ! SysError {
+        let all : ProcInfo[] = ProcSys::list();
+        for (i of 0..all.length) {
+            if (all[i].pid == pid) {
+                return all[i].copy();
+            }
+        }
+        throw Gone("proc.get", ProcInfo::label(pid));
+    }
+
+    /**
+     * The processes whose image name is `name`, capitals and small letters not told apart; none is an empty
+     * list.
+     */
+    pub static fn find(name : string) : ProcInfo[] ! SysError {
+        let all : ProcInfo[] = ProcSys::list();
+        let found : List<ProcInfo> = new List<ProcInfo>();
+        for (i of 0..all.length) {
+            if (Utf8::sameFolded(all[i].name, name)) {
+                found.add(all[i].copy());
+            }
+        }
+        return found.toArray();
+    }
+
+    /** The path of the program `pid` runs. Another user's process may refuse this with `Denied`. */
+    pub static fn imagePath(pid : i64) : string ! SysError {
+        return ProcSys::imagePath(pid);
+    }
+
+    /** How urgently the system schedules `pid`. */
+    pub static fn priority(pid : i64) : Priority ! SysError {
+        return ProcSys::priority(pid);
+    }
+
+    /** Set how urgently the system schedules `pid`. */
+    pub static fn setPriority(pid : i64, level : Priority) : void ! SysError {
+        ProcSys::setPriority(pid, level);
+    }
+
+    /** Whether a priority of `level` can be set, so far as it can be known before trying one process. */
+    pub static fn canSetPriority(level : Priority) : Support {
+        let linux : bool = Os::name() == "linux";
+        let undecided : Support = Support::unknown(
+            "the process's owner and the access it grants decide"
+        );
+        return match level {
+            Priority::Realtime => linux ? Support::unsupported(
+                "real time is a scheduling policy on Linux, not a priority this call sets"
+            ) : Support::withPrivilege(
+                Privilege::Elevated,
+                "real time can starve the system's own work"
+            ),
+            Priority::AboveNormal | Priority::High => linux ? Support::withPrivilege(
+                Privilege::Elevated,
+                "raising a process's urgency needs CAP_SYS_NICE"
+            ) : undecided,
+            _ => undecided,
+        };
+    }
+
+    /** What setting `pid` to `level` would do. Nothing is done. */
+    pub static fn planSetPriority(pid : i64, level : Priority) : Plan {
+        let who : string = ProcInfo::label(pid);
+        let plan : Plan = new Plan("set the priority of " + who);
+        let access : Access = level == Priority::Realtime ? Access::Admin : Access::Change;
+        let mut undo : string = "";
+        try {
+            undo = "set it back to " + ProcSys::priority(pid).label();
+        } catch e : SysError {
+            // Its present priority cannot be read, so there is no way back to promise.
+        }
+        plan.add(new PlanStep("set the priority of " + who + " to " + level.label(), access, undo));
+        return plan;
+    }
+
+    /** Send `sig` to `pid`. */
+    pub static fn signal(pid : i64, sig : Signal) : void ! SysError {
+        ProcSys::signal(pid, sig);
+    }
+
+    /** Whether `sig` can be sent, so far as it can be known before trying one process. */
+    pub static fn canSignal(sig : Signal) : Support {
+        if (Os::name() == "windows" && (sig == Signal::Interrupt || sig == Signal::Hangup)) {
+            return Support::unsupported("Windows has no " + sig.label() + " for a process");
+        }
+        return Support::unknown("only the process's owner, or an elevated session, may");
+    }
+
+    /** What sending `sig` to `pid` would do. Nothing is done. */
+    pub static fn planSignal(pid : i64, sig : Signal) : Plan {
+        let who : string = ProcInfo::label(pid);
+        let undo : string = match sig {
+            Signal::Stop => "resume " + who,
+            Signal::Resume => "stop " + who + " again",
+            _ => "",
+        };
+        let plan : Plan = new Plan(sig.label() + " " + who);
+        plan.add(new PlanStep(sig.label() + " " + who, Access::Change, undo));
+        return plan;
+    }
+}

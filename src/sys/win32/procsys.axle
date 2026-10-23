@@ -1,0 +1,88 @@
+// sys/procsys — the process table, on Windows: one native call for the list, handles for the rest.
+//
+// The list is `NtQuerySystemInformation(SystemProcessInformation)`: a chain of variable-length records,
+// each giving the process's thread count, creation time, name, id, parent id and working set. The
+// chain is asked for with a buffer that grows until the system stops saying it was too small, since
+// processes may start between the size query and the read.
+//
+// Acting on one process opens it with only the rights that act needs, so a process the caller may
+// not touch is refused with `Denied` at the open, naming the elevated session that would be needed.
+// Windows reports an id that does not exist as "invalid parameter" (87); it is turned into `Gone` here,
+// which is the truth about it.
+
+use crate::sys::procrecords::ProcRecords;
+use crate::core::process::{ProcInfo, Priority, Signal};
+use crate::core::error::{SysError, Unsupported};
+use crate::sys::errno::Errno;
+use crate::sys::kernel32::{
+    GetLastError, CloseHandle, QueryFullProcessImageNameW, GetPriorityClass, SetPriorityClass,
+    PROCESS_SET_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
+};
+use crate::raw::buf::Buf;
+use crate::raw::wide::Wide;
+
+/** The process table. */
+pub class ProcSys {
+    /** Every process, as of now. */
+    pub static fn list() : ProcInfo[] ! SysError {
+        return ProcRecords::snapshot();
+    }
+
+    /** The path of the program `pid` runs. */
+    pub static fn imagePath(pid : i64) : string ! SysError {
+        let h : ptr = ProcRecords::open("proc.imagePath", pid, PROCESS_QUERY_LIMITED_INFORMATION);
+        let text : Buf = new Buf(65536);
+        let size : Buf = new Buf(4);
+        size.putI32(0, 32768);
+        let ok : i32 = QueryFullProcessImageNameW(h, 0, text.ptr(), size.ptr());
+        let code : i32 = GetLastError();
+        CloseHandle(h);
+        if (ok == 0) {
+            Errno::win32("proc.imagePath", ProcInfo::label(pid), code);
+        }
+        return Wide::readN(text.ptr(), size.i32At(0));
+    }
+
+    /** How urgently the system schedules `pid`. */
+    pub static fn priority(pid : i64) : Priority ! SysError {
+        let h : ptr = ProcRecords::open("proc.priority", pid, PROCESS_QUERY_LIMITED_INFORMATION);
+        let cls : i32 = GetPriorityClass(h);
+        let code : i32 = GetLastError();
+        CloseHandle(h);
+        if (cls == 0) {
+            Errno::win32("proc.priority", ProcInfo::label(pid), code);
+        }
+        return Priority::fromWinClass(cls);
+    }
+
+    /** Set how urgently the system schedules `pid`. */
+    pub static fn setPriority(pid : i64, level : Priority) : void ! SysError {
+        let h : ptr = ProcRecords::open("proc.setPriority", pid, PROCESS_SET_INFORMATION);
+        let ok : i32 = SetPriorityClass(h, level.winClass());
+        let code : i32 = GetLastError();
+        CloseHandle(h);
+        if (ok == 0) {
+            let what : string = ProcInfo::label(pid) + " to " + level.label();
+            Errno::win32("proc.setPriority", what, code);
+        }
+    }
+
+    /** Send `sig` to `pid`; Windows has no `Interrupt` or `Hangup` for a process. */
+    pub static fn signal(pid : i64, sig : Signal) : void ! SysError {
+        match sig {
+            Signal::Terminate | Signal::Kill => {
+                ProcRecords::terminate(pid, sig);
+            },
+            Signal::Stop | Signal::Resume => {
+                ProcRecords::freeze(pid, sig == Signal::Stop);
+            },
+            _ => {
+                throw Unsupported(
+                    "proc.signal",
+                    "windows",
+                    sig.label() + " (Windows has no such signal for a process)"
+                );
+            },
+        }
+    }
+}

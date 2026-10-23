@@ -1,0 +1,77 @@
+// procstat — reading the line Linux keeps for each process, `/proc/<pid>/stat`.
+//
+//     4120 (chrome helper) S 1 4120 4120 0 -1 4194560 ... 20 0 11 0 1830442 ... 25641 ...
+//
+// The fields are separated by spaces, but the second is the process's name in parentheses and the name
+// may hold spaces and parentheses of its own; the only safe way to find where it ends is the *last*
+// closing parenthesis on the line. After it come the numbered fields of proc(5): `ppid` is the 4th
+// field of the line, `num_threads` the 20th, `starttime` the 22nd (in clock ticks since boot) and `rss`
+// the 24th (in pages). This file is the reading of that line and nothing else, so it is checked on
+// real lines without a machine; the port reads the file and gives the text here.
+
+use crate::core::scan::{Scan, Line};
+use crate::core::text::Utf8;
+use crate::core::process::ProcInfo;
+use crate::core::error::Invalid;
+
+/** How the numbers of a stat line are to be read: the system's clock and its page. */
+pub struct ProcClock {
+    /** When the system started, in milliseconds since 1970. */
+    pub bootMillis : i64 = 0;
+
+    /** How long a clock tick is: 10 for the usual 100 per second. */
+    pub tickMillis : i64 = 10;
+
+    /** The size of a page, in bytes. */
+    pub pageBytes  : i64 = 4096;
+}
+
+/**
+ * The numbered fields of proc(5) after the name, counted from the state (0): the parent, the threads, the
+ * start time and the resident pages.
+ */
+const STAT_PPID : i32 = 1;
+const STAT_THREADS : i32 = 17;
+const STAT_STARTTIME : i32 = 19;
+const STAT_RSS : i32 = 21;
+
+/** One line of `/proc/<pid>/stat`, read. */
+pub class ProcStat {
+    /**
+     * When the system started, in seconds since 1970, from the text of `/proc/stat` (its `btime` line); -1 if
+     * there is none.
+     */
+    pub static fn bootSeconds(text : string) : i64 {
+        let at : i64 = Scan::lineWith(text, "btime ");
+        return at < 0 ? -1 : Line::at(text, at).field(1).dec();
+    }
+
+    /** The process `line` describes, its times and sizes read with `clock`. */
+    pub static fn parse(line : string, clock : ProcClock) : ProcInfo ! Invalid {
+        let open : i64 = Scan::indexOf(line, 40, 0, line.byteLength);
+        let close : i64 = Scan::lastIndexOf(line, 41, 0, line.byteLength);
+        if (open < 0 || close < open) {
+            throw Invalid("proc.read", "stat line", "no name between parentheses");
+        }
+        let pid : i64 = Scan::dec(line, 0, open - 1);
+        if (pid < 0 || open < 2) {
+            throw Invalid("proc.read", "stat line", "no process id");
+        }
+        let after : Line = Line { src: line, start: close + 1, end: line.byteLength };
+        let parent : i64 = after.field(STAT_PPID).dec();
+        let threads : i64 = after.field(STAT_THREADS).dec();
+        let ticks : i64 = after.field(STAT_STARTTIME).dec();
+        let pages : i64 = after.field(STAT_RSS).dec();
+        if (parent < 0 || threads < 0 || ticks < 0 || pages < 0) {
+            throw Invalid("proc.read", "pid " + pid.toString(), "the stat line is cut short");
+        }
+        return new ProcInfo(
+            pid,
+            parent,
+            Utf8::slice(line, open + 1, close),
+            threads as i32,
+            clock.bootMillis + ticks * clock.tickMillis,
+            pages * clock.pageBytes
+        );
+    }
+}

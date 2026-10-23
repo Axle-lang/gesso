@@ -1,0 +1,97 @@
+// sys/procsys — the process table, on Linux: `/proc`, and the calls that act on a process.
+//
+// Every process is a directory of `/proc` named by its id, and `stat` in it is one line (read by
+// `core/procstat`). The listing is a snapshot built from many small reads, so a process that exits
+// between the directory read and the file read is simply absent from it; that race is not an error.
+// Anything else that goes wrong — `/proc` itself unreadable, a read that fails for another reason —
+// is raised.
+//
+// A process the caller does not own may be read but, mostly, not changed: `kill` and `setpriority`
+// answer EPERM, which arrives as `Denied` naming the elevated session that would be needed.
+
+use crate::sys::procfiles::ProcFiles;
+use crate::core::process::{ProcInfo, Priority, Signal};
+use crate::core::procstat::{ProcStat, ProcClock};
+use crate::core::list::{List, Values};
+use crate::core::error::{SysError, Invalid, Unsupported, Gone};
+use crate::sys::errno::Errno;
+use crate::sys::libc::{
+    readlink, getpriority, setpriority, sched_getscheduler, kill, PRIO_PROCESS, SCHED_FIFO, SCHED_RR,
+};
+use crate::sys::files::Files;
+use crate::raw::buf::Buf;
+use crate::raw::wide::Narrow;
+
+/** The process table. */
+pub class ProcSys {
+    /** Every process, as of now. */
+    pub static fn list() : ProcInfo[] ! SysError {
+        let clock : ProcClock = ProcFiles::clock();
+        let ids : Values<i64> = ProcFiles::pids();
+        let found : List<ProcInfo> = new List<ProcInfo>();
+        for (i of 0..ids.size()) {
+            try {
+                let line : string = Files::slurp(
+                    "proc.list",
+                    "/proc/" + ids.at(i).toString() + "/stat"
+                );
+                found.add(ProcStat::parse(line, clock));
+            } catch e : Gone {
+                // It exited between the directory and the file.
+            } catch e : Invalid {
+                // It was half-gone, and the line is cut short.
+            }
+        }
+        return found.toArray();
+    }
+
+    /** The path of the program `pid` runs. */
+    pub static fn imagePath(pid : i64) : string ! SysError {
+        let link : Buf = Narrow::alloc("/proc/" + pid.toString() + "/exe");
+        let target : Buf = new Buf(4096);
+        let n : i64 = readlink(link.ptr(), target.ptr(), 4095);
+        if (n < 0) {
+            Errno::posix("proc.imagePath", ProcInfo::label(pid), Files::errno());
+        }
+        return Narrow::read(target.ptr(), n);
+    }
+
+    /** How urgently the system schedules `pid`. */
+    pub static fn priority(pid : i64) : Priority ! SysError {
+        let policy : i32 = sched_getscheduler(pid as i32);
+        if (policy == SCHED_FIFO || policy == SCHED_RR) {
+            return Priority::Realtime;
+        }
+        // -1 is a valid nice value, so a failure is told apart by errno, cleared first.
+        Files::clearErrno();
+        let nice : i32 = getpriority(PRIO_PROCESS, pid as i32);
+        let code : i32 = Files::errno();
+        if (nice == -1 && code != 0) {
+            Errno::posix("proc.priority", ProcInfo::label(pid), code);
+        }
+        return Priority::fromNice(nice);
+    }
+
+    /** Set how urgently the system schedules `pid`. */
+    pub static fn setPriority(pid : i64, level : Priority) : void ! SysError {
+        if (level == Priority::Realtime) {
+            throw Unsupported(
+                "proc.setPriority",
+                "linux",
+                "real time is a scheduling policy here, not a nice value"
+            );
+        }
+        if (setpriority(PRIO_PROCESS, pid as i32, level.nice()) != 0) {
+            let what : string = ProcInfo::label(pid) + " to " + level.label();
+            Errno::posix("proc.setPriority", what, Files::errno());
+        }
+    }
+
+    /** Send `sig` to `pid`. */
+    pub static fn signal(pid : i64, sig : Signal) : void ! SysError {
+        if (kill(pid as i32, sig.posix()) != 0) {
+            let what : string = ProcInfo::label(pid) + " (" + sig.label() + ")";
+            Errno::posix("proc.signal", what, Files::errno());
+        }
+    }
+}

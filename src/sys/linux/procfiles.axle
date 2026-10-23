@@ -1,0 +1,35 @@
+// sys/procfiles — what `/proc` says of the processes as a whole, for the Linux process and network seams.
+
+use crate::core::scan::Scan;
+use crate::core::procstat::{ProcStat, ProcClock};
+use crate::sys::libc::{sysconf, SC_CLK_TCK, SC_PAGESIZE};
+use crate::core::list::{Values};
+use crate::core::error::SysError;
+use crate::sys::files::Files;
+
+/** Reading `/proc` for the ids of the processes. */
+pub class ProcFiles {
+    /** The ids in `/proc`: every entry whose name is all digits. */
+    pub static fn pids() : Values<i64> ! SysError {
+        let list : Values<i64> = new Values<i64>();
+        let names : string[] = Files::names("proc.list", "/proc");
+        for (i of 0..names.length) {
+            let pid : i64 = Scan::dec(names[i], 0, names[i].byteLength);
+            if (pid > 0) {
+                list.add(pid);
+            }
+        }
+        return list;
+    }
+
+    /** The clock and the page of this system, for reading stat lines. */
+    pub static fn clock() : ProcClock ! SysError {
+        let ticksPerSecond : i64 = sysconf(SC_CLK_TCK);
+        let page : i64 = sysconf(SC_PAGESIZE);
+        return ProcClock {
+            bootMillis: ProcStat::bootSeconds(Files::slurp("proc.list", "/proc/stat")) * 1000,
+            tickMillis: ticksPerSecond > 0 ? 1000 / ticksPerSecond : 10,
+            pageBytes: page > 0 ? page : 4096,
+        };
+    }
+}

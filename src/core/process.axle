@@ -1,0 +1,223 @@
+// process — the vocabulary of processes: what one is, how urgent it is, and what can be said to it.
+//
+// These are the types the process seam (`sys/procsys`) returns and the `proc` module hands to a
+// program, so they live below both. They are data: a `ProcInfo` is a reading taken at one moment and
+// does not change afterwards; asking the process for more later may say `Gone`.
+
+use crate::core::ident::Key;
+use crate::core::list::Copy;
+use crate::core::units::Bytes;
+
+/** How urgently the system schedules a process, on a scale both platforms have. */
+pub enum Priority : i32 {
+    /** Runs only when nothing else wants the processor. */
+    Idle = 0,
+
+    /** A little behind ordinary work. */
+    BelowNormal = 1,
+
+    /** What a process starts with. */
+    Normal = 2,
+
+    /** A little ahead of ordinary work. */
+    AboveNormal = 3,
+
+    /** Ahead of ordinary work: the interface of a program the user is waiting on. */
+    High = 4,
+
+    /** Ahead of everything, the system's own work included. Needs an elevated session. */
+    Realtime = 5,
+
+    /**
+     * The nice value POSIX gives this level (-20 is the most urgent, 19 the least). `Realtime` has none: it
+     * is a scheduling policy there, and answers -20.
+     */
+    pub fn nice(self) : i32 {
+        return match self {
+            Priority::Idle => 19,
+            Priority::BelowNormal => 10,
+            Priority::Normal => 0,
+            Priority::AboveNormal => -5,
+            Priority::High => -10,
+            Priority::Realtime => -20,
+        };
+    }
+
+    /** The level a nice value falls in. */
+    pub static fn fromNice(n : i32) : Priority {
+        if (n >= 15) {
+            return Priority::Idle;
+        }
+        if (n >= 5) {
+            return Priority::BelowNormal;
+        }
+        if (n >= -4) {
+            return Priority::Normal;
+        }
+        return n >= -9 ? Priority::AboveNormal : Priority::High;
+    }
+
+    /** The Windows priority class (`SetPriorityClass`) this level stands for. */
+    pub fn winClass(self) : i32 {
+        return match self {
+            Priority::Idle => 0x40,
+            Priority::BelowNormal => 0x4000,
+            Priority::Normal => 0x20,
+            Priority::AboveNormal => 0x8000,
+            Priority::High => 0x80,
+            Priority::Realtime => 0x100,
+        };
+    }
+
+    /** The level a Windows priority class stands for; `Normal` for a class this scale has no word for. */
+    pub static fn fromWinClass(c : i32) : Priority {
+        return match c {
+            0x40 => Priority::Idle,
+            0x4000 => Priority::BelowNormal,
+            0x8000 => Priority::AboveNormal,
+            0x80 => Priority::High,
+            0x100 => Priority::Realtime,
+            _ => Priority::Normal,
+        };
+    }
+
+    /** Its name in a sentence: "below normal". */
+    pub fn label(self) : string {
+        return match self {
+            Priority::Idle => "idle",
+            Priority::BelowNormal => "below normal",
+            Priority::Normal => "normal",
+            Priority::AboveNormal => "above normal",
+            Priority::High => "high",
+            Priority::Realtime => "real time",
+        };
+    }
+
+    /**
+     * The priority at position `n` of the scale (0 for idle, 5 for real time); anything outside is clamped.
+     */
+    pub static fn at(n : i32) : Priority {
+        if (n <= 0) {
+            return Priority::Idle;
+        }
+        return match n {
+            1 => Priority::BelowNormal,
+            2 => Priority::Normal,
+            3 => Priority::AboveNormal,
+            4 => Priority::High,
+            _ => Priority::Realtime,
+        };
+    }
+}
+
+/**
+ * What can be said to a process. Windows answers `Terminate` and `Kill`, and `Stop` and `Resume`; the rest is
+ * `Unsupported` there.
+ */
+pub enum Signal : i32 {
+    /** Ask it to stop, as Ctrl-C does. */
+    Interrupt = 0,
+
+    /** Ask it to end, and let it clean up. */
+    Terminate = 1,
+
+    /** End it now, with no chance to clean up. */
+    Kill = 2,
+
+    /** Tell it its terminal is gone, which daemons read as "reload". */
+    Hangup = 3,
+
+    /** Freeze it. */
+    Stop = 4,
+
+    /** Let a frozen process go on. */
+    Resume = 5,
+
+    /** The POSIX signal number this stands for. */
+    pub fn posix(self) : i32 {
+        return match self {
+            Signal::Interrupt => 2,
+            Signal::Terminate => 15,
+            Signal::Kill => 9,
+            Signal::Hangup => 1,
+            Signal::Stop => 19,
+            Signal::Resume => 18,
+        };
+    }
+
+    /** Its name in a sentence. */
+    pub fn label(self) : string {
+        return match self {
+            Signal::Interrupt => "interrupt",
+            Signal::Terminate => "terminate",
+            Signal::Kill => "kill",
+            Signal::Hangup => "hang up",
+            Signal::Stop => "stop",
+            Signal::Resume => "resume",
+        };
+    }
+}
+
+/** One process, at the moment it was read. */
+pub class ProcInfo : Copy<ProcInfo> {
+    /** What identifies it across readings: its id and when it started, so a reused id is a different key. */
+    pub key     : i64;
+
+    /** Its id. */
+    pub pid     : i64;
+
+    /** The id of the process that started it, or -1 when that is not known. */
+    pub parent  : i64;
+
+    /** Its image name: "chrome.exe", "sshd". */
+    pub name    : string;
+
+    /** How many threads it has. */
+    pub threads : i32;
+
+    /** When it started, in milliseconds since 1970; 0 when not known. */
+    pub started : i64;
+
+    /** The memory it holds in physical memory (the working set, the resident size), in bytes. */
+    pub memory  : i64;
+
+    /** A process read as `pid`, child of `parent`, named `name`. */
+    constructor(
+        pid : i64,
+        parent : i64,
+        name : string,
+        threads : i32,
+        started : i64,
+        memory : i64
+    ) {
+        self.pid = pid;
+        self.parent = parent;
+        self.name = name;
+        self.threads = threads;
+        self.started = started;
+        self.memory = memory;
+        self.key = Key::named(pid, name) ^ started;
+    }
+
+    /** One line: "chrome.exe [4120] 120.4 MiB". */
+    pub fn describe(self) : string {
+        return self.name + " [" + self.pid.toString() + "] " + Bytes::human(self.memory);
+    }
+
+    /** How an error message names the process `pid`: "process 4120". */
+    pub static fn label(pid : i64) : string {
+        return "process " + pid.toString();
+    }
+
+    /** A separate object with the same reading, for a list that must not share its rows with another. */
+    pub fn copy(self) : ProcInfo {
+        return new ProcInfo(
+            self.pid,
+            self.parent,
+            self.name,
+            self.threads,
+            self.started,
+            self.memory
+        );
+    }
+}

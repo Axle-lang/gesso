@@ -1,0 +1,43 @@
+// fakes/procsys — the `sys::procsys` seam as the tests see it: a small fixed machine.
+//
+// The same public shape as src/sys/win32/procsys.axle and src/sys/linux/procsys.axle. The machine has
+// five processes, among them a pair reusing the shape a real list has (an orphan, a parent), and a
+// test that needs a refusal replaces the seam's function for the length of the test.
+
+use crate::core::process::{ProcInfo, Priority, Signal};
+use crate::core::error::{SysError, Gone};
+
+/** A machine that is always the same. */
+pub class ProcSys {
+    pub static fn list() : ProcInfo[] ! SysError {
+        let mut out : ProcInfo[] = malloc<ProcInfo>(5 as i64);
+        out[0 as i64] = new ProcInfo(1, 0, "init", 1, 1000, 4096);
+        out[1 as i64] = new ProcInfo(20, 1, "Shell", 3, 2000, 90000);
+        out[2 as i64] = new ProcInfo(21, 20, "editor", 8, 3000, 500000);
+        out[3 as i64] = new ProcInfo(22, 20, "Editor", 2, 4000, 7000);
+        out[4 as i64] = new ProcInfo(30, 777, "orphan", 1, 5000, 1200);
+        return out;
+    }
+    pub static fn imagePath(pid : i64) : string ! SysError {
+        if (pid == 21) {
+            return "/usr/bin/editor";
+        }
+        throw Gone("proc.imagePath", "process " + pid.toString());
+    }
+    pub static fn priority(pid : i64) : Priority ! SysError {
+        if (pid == 21) {
+            return Priority::High;
+        }
+        throw Gone("proc.priority", "process " + pid.toString());
+    }
+    pub static fn setPriority(pid : i64, level : Priority) : void ! SysError {
+        if (pid != 21) {
+            throw Gone("proc.setPriority", "process " + pid.toString());
+        }
+    }
+    pub static fn signal(pid : i64, sig : Signal) : void ! SysError {
+        if (pid != 21) {
+            throw Gone("proc.signal", "process " + pid.toString());
+        }
+    }
+}

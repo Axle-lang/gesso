@@ -1,0 +1,246 @@
+// tree — processes as a tree, which is what they are.
+//
+// A process list is flat, and each row names its parent. `ProcTree` makes the shape explicit: the roots,
+// each process's children, a depth-first order a program can draw as an outline, and the questions a
+// shape answers — who are this one's descendants, who are its ancestors.
+//
+// Two things make a process list lie about its shape, and both are handled. A parent that has exited
+// leaves its children naming an id that is no longer there; and the system reuses ids, so a child may
+// name a parent id that now belongs to a younger process. In both cases the child is a root: a parent
+// must exist, and must not have started after its child.
+
+use crate::core::index::PidIndex;
+use crate::core::process::ProcInfo;
+
+/** The shape of a list of processes. */
+pub class ProcTree {
+    infos       : ProcInfo[];
+    count       : i32;
+    parentOf    : i32[];
+    firstChild  : i32[];
+    nextSibling : i32[];
+    order       : i32[];
+    depths      : i32[];
+    index       : PidIndex;
+    roots       : i32 = 0;
+
+    /** The tree of `infos`, a list as a reading returned it. */
+    constructor(own infos : ProcInfo[]) {
+        self.count = infos.length as i32;
+        self.infos = infos;
+        self.parentOf = malloc<i32>(self.count as i64);
+        self.firstChild = malloc<i32>(self.count as i64);
+        self.nextSibling = malloc<i32>(self.count as i64);
+        self.order = malloc<i32>(self.count as i64);
+        self.depths = malloc<i32>(self.count as i64);
+        self.index = new PidIndex(self.count);
+        for (i of 0..self.count) {
+            self.index.put(self.infos[i as i64].pid, i);
+            self.firstChild[i as i64] = -1;
+            self.nextSibling[i as i64] = -1;
+        }
+        self.link();
+        self.walk();
+    }
+
+    /** Whether process `i`'s named parent is a real one: present, not itself, and not younger. */
+    pub(file) fn parentIndex(self, i : i32) : i32 {
+        let p : i32 = self.index.get(self.infos[i as i64].parent);
+        if (p < 0 || p == i) {
+            return -1;
+        }
+        let parentStart : i64 = self.infos[p as i64].started;
+        let childStart : i64 = self.infos[i as i64].started;
+        if (parentStart > 0 && childStart > 0 && parentStart > childStart) {
+            return -1;
+        }
+        return p;
+    }
+
+    /** Cut one link in every loop of parents, which only start times that tie or are unknown can leave. */
+    pub(file) fn breakLoops(mut self) : void {
+        for (i of 0..self.count) {
+            // After `count` steps up a chain that never ends, the walk is inside the loop.
+            let mut at : i32 = i;
+            let mut steps : i32 = 0;
+            while (at >= 0 && steps < self.count) {
+                at = self.parentOf[at as i64];
+                steps = steps + 1;
+            }
+            if (at >= 0) {
+                self.parentOf[at as i64] = -1;
+            }
+        }
+    }
+
+    /** Join every process to its parent: the parent's first child, and the siblings in list order. */
+    pub(file) fn link(mut self) : void {
+        for (i of 0..self.count) {
+            self.parentOf[i as i64] = self.parentIndex(i);
+        }
+        self.breakLoops();
+        // Walking backwards and pushing on the front leaves each child list in the order of the input.
+        let mut i : i32 = self.count - 1;
+        while (i >= 0) {
+            let p : i32 = self.parentOf[i as i64];
+            if (p >= 0) {
+                self.nextSibling[i as i64] = self.firstChild[p as i64];
+                self.firstChild[p as i64] = i;
+            }
+            i = i - 1;
+        }
+    }
+
+    /** Lay the processes out depth first, roots in list order, children in list order. */
+    pub(file) fn walk(mut self) : void {
+        let mut stack : i32[] = malloc<i32>((self.count + 1) as i64);
+        let mut stackDepth : i32[] = malloc<i32>((self.count + 1) as i64);
+        let mut top : i32 = 0;
+        let mut placed : i32 = 0;
+        // Roots are pushed last to first, so the first root is on top.
+        let mut r : i32 = self.count - 1;
+        while (r >= 0) {
+            if (self.parentOf[r as i64] < 0) {
+                stack[top as i64] = r;
+                stackDepth[top as i64] = 0;
+                top = top + 1;
+                self.roots = self.roots + 1;
+            }
+            r = r - 1;
+        }
+        while (top > 0) {
+            top = top - 1;
+            let at : i32 = stack[top as i64];
+            let depth : i32 = stackDepth[top as i64];
+            self.order[placed as i64] = at;
+            self.depths[placed as i64] = depth;
+            placed = placed + 1;
+            top = self.pushChildren(at, depth + 1, stack, stackDepth, top);
+        }
+    }
+
+    /** Put the children of `parent` on the stack, in reverse so the first child is on top; the new top. */
+    pub(file) fn pushChildren(
+        self,
+        parent : i32,
+        depth : i32,
+        stack : i32[],
+        depths : i32[],
+        top : i32
+    ) : i32 {
+        let mut kids : i32 = 0;
+        let mut c : i32 = self.firstChild[parent as i64];
+        while (c >= 0) {
+            kids = kids + 1;
+            c = self.nextSibling[c as i64];
+        }
+        let mut slot : i32 = top + kids - 1;
+        c = self.firstChild[parent as i64];
+        while (c >= 0) {
+            stack[slot as i64] = c;
+            depths[slot as i64] = depth;
+            slot = slot - 1;
+            c = self.nextSibling[c as i64];
+        }
+        return top + kids;
+    }
+
+    /** How many processes there are. */
+    pub fn size(self) : i32 {
+        return self.count;
+    }
+
+    /** How many have no parent in the list. */
+    pub fn rootCount(self) : i32 {
+        return self.roots;
+    }
+
+    /** The process shown at row `row` of the outline. */
+    pub fn infoAt(self, row : i32) : ProcInfo {
+        return self.infos[self.order[row as i64] as i64];
+    }
+
+    /** How deep row `row` sits in the outline: 0 for a root. */
+    pub fn depthAt(self, row : i32) : i32 {
+        return self.depths[row as i64];
+    }
+
+    /** The row of process `pid` in the outline, or -1. */
+    pub fn rowOf(self, pid : i64) : i32 {
+        let i : i32 = self.index.get(pid);
+        if (i < 0) {
+            return -1;
+        }
+        for (row of 0..self.count) {
+            if (self.order[row as i64] == i) {
+                return row;
+            }
+        }
+        return -1;
+    }
+
+    /** The id of the parent of `pid`, or -1 for a root or an unknown process. */
+    pub fn parentPid(self, pid : i64) : i64 {
+        let i : i32 = self.index.get(pid);
+        if (i < 0 || self.parentOf[i as i64] < 0) {
+            return -1;
+        }
+        return self.infos[self.parentOf[i as i64] as i64].pid;
+    }
+
+    /** The ids of the children of `pid`, in list order. */
+    pub fn childrenOf(self, pid : i64) : i64[] {
+        let i : i32 = self.index.get(pid);
+        let mut n : i32 = 0;
+        let mut c : i32 = i < 0 ? -1 : self.firstChild[i as i64];
+        while (c >= 0) {
+            n = n + 1;
+            c = self.nextSibling[c as i64];
+        }
+        let mut out : i64[] = malloc<i64>(n as i64);
+        let mut k : i32 = 0;
+        c = i < 0 ? -1 : self.firstChild[i as i64];
+        while (c >= 0) {
+            out[k as i64] = self.infos[c as i64].pid;
+            k = k + 1;
+            c = self.nextSibling[c as i64];
+        }
+        return out;
+    }
+
+    /** The ids of everything below `pid`, in outline order. */
+    pub fn descendantsOf(self, pid : i64) : i64[] {
+        let row : i32 = self.rowOf(pid);
+        let mut n : i32 = 0;
+        if (row >= 0) {
+            let base : i32 = self.depths[row as i64];
+            let mut k : i32 = row + 1;
+            while (k < self.count && self.depths[k as i64] > base) {
+                n = n + 1;
+                k = k + 1;
+            }
+        }
+        let mut out : i64[] = malloc<i64>(n as i64);
+        for (j of 0..n) {
+            out[j as i64] = self.infos[self.order[(row + 1 + j) as i64] as i64].pid;
+        }
+        return out;
+    }
+
+    /** The ids above `pid`, nearest first: its parent, then that one's parent, up to a root. */
+    pub fn ancestorsOf(self, pid : i64) : i64[] {
+        let mut n : i32 = 0;
+        let mut i : i32 = self.index.get(pid);
+        while (i >= 0 && self.parentOf[i as i64] >= 0) {
+            i = self.parentOf[i as i64];
+            n = n + 1;
+        }
+        let mut out : i64[] = malloc<i64>(n as i64);
+        i = self.index.get(pid);
+        for (j of 0..n) {
+            i = self.parentOf[i as i64];
+            out[j as i64] = self.infos[i as i64].pid;
+        }
+        return out;
+    }
+}
