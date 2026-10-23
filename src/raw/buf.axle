@@ -1,0 +1,151 @@
+// buf — a block of memory that is freed, and read with its length in hand.
+//
+// Most operating-system listings are asked for twice: once to learn how big the answer is, once to
+// receive it, and between the two it may grow. `Buf` is the block for that: it starts at a size,
+// `fit`s when the system says it was too small, and gives its memory back when it goes out of scope
+// or is disposed. Its reads are bounds-checked against the length it was given, so a record that is
+// shorter than the offset asks stops the program with a message instead of reading past the end — the
+// checked version of what `Raw` does unchecked.
+
+use std::ffi::runtime::panicMsg;
+use crate::raw::mem::Raw;
+
+/** Owned, zero-filled memory that knows its size. */
+pub class Buf {
+    base : ptr;
+    len  : i64;
+
+    /** A block of `len` zero bytes (at least one). */
+    constructor(len : i64) {
+        self.len = len > 0 ? len : 1;
+        self.base = Raw::take(self.len);
+        if (Raw::isNil(self.base)) {
+            panicMsg("gesso: out of memory");
+        }
+        Raw::clear(self.base, self.len);
+    }
+
+    /** The block's address, for passing to a system call. */
+    pub fn ptr(self) : ptr {
+        return self.base;
+    }
+
+    /** How many bytes it holds. */
+    pub fn size(self) : i64 {
+        return self.len;
+    }
+
+    /**
+     * Make room for at least `len` bytes. What was held is discarded and the block is zeroed: for a listing
+     * that is about to be read again.
+     */
+    pub fn fit(mut self, len : i64) : void {
+        if (len <= self.len) {
+            Raw::clear(self.base, self.len);
+            return;
+        }
+        Raw::release(self.base);
+        self.len = len;
+        self.base = Raw::take(len);
+        if (Raw::isNil(self.base)) {
+            panicMsg("gesso: out of memory");
+        }
+        Raw::clear(self.base, len);
+    }
+
+    /** Make room for at least `len` bytes, keeping what is held. */
+    pub fn grow(mut self, len : i64) : void {
+        if (len <= self.len) {
+            return;
+        }
+        let bigger : ptr = Raw::take(len);
+        if (Raw::isNil(bigger)) {
+            panicMsg("gesso: out of memory");
+        }
+        Raw::clear(bigger, len);
+        Raw::copy(bigger, self.base, self.len);
+        Raw::release(self.base);
+        self.base = bigger;
+        self.len = len;
+    }
+
+    /** Whether the `width` bytes at `off` lie inside the block. */
+    pub fn holds(self, off : i64, width : i64) : bool {
+        return off >= 0 && width >= 0 && off + width <= self.len;
+    }
+
+    /** Stop the program, naming the offset, when `width` bytes at `off` are not inside the block. */
+    pub(file) fn need(self, off : i64, width : i64) : void {
+        if (!self.holds(off, width)) {
+            let read : string = "read of " + width.toString() + " bytes at " + off.toString();
+            panicMsg("gesso: " + read + " in a block of " + self.len.toString());
+        }
+    }
+
+    /** The unsigned byte at `off`. */
+    pub fn u8At(self, off : i64) : i32 {
+        self.need(off, 1);
+        return Raw::u8At(self.base, off);
+    }
+
+    /** The unsigned 16-bit word at `off`. */
+    pub fn u16At(self, off : i64) : i32 {
+        self.need(off, 2);
+        return Raw::u16At(self.base, off);
+    }
+
+    /** The 32-bit word at `off`. */
+    pub fn i32At(self, off : i64) : i32 {
+        self.need(off, 4);
+        return Raw::i32At(self.base, off);
+    }
+
+    /** The unsigned 32-bit word at `off`, as an `i64`. */
+    pub fn u32At(self, off : i64) : i64 {
+        self.need(off, 4);
+        return Raw::u32At(self.base, off);
+    }
+
+    /** The 64-bit word at `off`. */
+    pub fn i64At(self, off : i64) : i64 {
+        self.need(off, 8);
+        return Raw::i64At(self.base, off);
+    }
+
+    /** Store the byte `v` at `off`. */
+    pub fn putU8(mut self, off : i64, v : i32) : void {
+        self.need(off, 1);
+        Raw::putU8(self.base, off, v);
+    }
+
+    /** Store the 16-bit word `v` at `off`. */
+    pub fn putU16(mut self, off : i64, v : i32) : void {
+        self.need(off, 2);
+        Raw::putU16(self.base, off, v);
+    }
+
+    /** Store the 32-bit word `v` at `off`. */
+    pub fn putI32(mut self, off : i64, v : i32) : void {
+        self.need(off, 4);
+        Raw::putI32(self.base, off, v);
+    }
+
+    /** Store the 64-bit word `v` at `off`. */
+    pub fn putI64(mut self, off : i64, v : i64) : void {
+        self.need(off, 8);
+        Raw::putI64(self.base, off, v);
+    }
+
+    /** Give the memory back now. Harmless to call twice, and what `drop` does. */
+    pub fn dispose(mut self) : void {
+        if (!Raw::isNil(self.base)) {
+            Raw::release(self.base);
+            self.base = Raw::nil();
+            self.len = 0;
+        }
+    }
+
+    drop() {
+        self.dispose();
+    }
+}

@@ -1,0 +1,80 @@
+// wide — strings across the boundary: NUL-terminated UTF-16 for Windows, UTF-8 for POSIX.
+//
+// A system call takes its text as a pointer to terminated code units. `Wide` builds that block from an
+// Axle string and reads one back; `Narrow` does the same for UTF-8. Both sit over `Buf`, so the memory
+// is freed when the block goes out of scope, and the reads are bounded by the block's length rather
+// than trusting the terminator to be there.
+
+use std::text::StringBuilder;
+use crate::core::text::{Utf8, Utf16};
+use crate::raw::mem::Raw;
+use crate::raw::buf::Buf;
+
+/** UTF-16 text in memory. */
+pub class Wide {
+    /** A NUL-terminated UTF-16 copy of `s`. */
+    pub static fn alloc(s : string) : Buf {
+        let coded : i32[] = Utf16::encode(s);
+        let n : i32 = Utf16::length(s);
+        let buf : Buf = new Buf(((n + 1) * 2) as i64);
+        for (i of 0..(n + 1)) {
+            buf.putU16((i * 2) as i64, coded[i as i64]);
+        }
+        return buf;
+    }
+
+    /**
+     * The text of the UTF-16 string at `base`, up to its NUL or `maxUnits` code units, whichever comes first.
+     */
+    pub static fn read(base : ptr, maxUnits : i32) : string {
+        let mut n : i32 = 0;
+        while (n < maxUnits && Raw::u16At(base, (n * 2) as i64) != 0) {
+            n = n + 1;
+        }
+        return Wide::readN(base, n);
+    }
+
+    /** The text of exactly `n` code units at `base`. */
+    pub static fn readN(base : ptr, n : i32) : string {
+        let mut units : i32[] = malloc<i32>((n + 1) as i64);
+        for (i of 0..n) {
+            units[i as i64] = Raw::u16At(base, (i * 2) as i64);
+        }
+        return Utf16::decode(units, n);
+    }
+}
+
+/** UTF-8 text in memory. */
+pub class Narrow {
+    /** A NUL-terminated UTF-8 copy of `s`. */
+    pub static fn alloc(s : string) : Buf {
+        let n : i64 = s.byteLength;
+        let buf : Buf = new Buf(n + 1);
+        for (i of 0..n) {
+            buf.putU8(i, s.byteAt(i));
+        }
+        return buf;
+    }
+
+    /** The text of the UTF-8 string at `base`, up to its NUL or `maxBytes` bytes. */
+    pub static fn read(base : ptr, maxBytes : i64) : string {
+        let sb : StringBuilder = new StringBuilder();
+        let mut n : i64 = 0;
+        while (n < maxBytes && Raw::u8At(base, n) != 0) {
+            n = n + 1;
+        }
+        let mut i : i64 = 0;
+        while (i < n) {
+            let lead : i32 = Raw::u8At(base, i);
+            let width : i64 = Utf8::width(lead) as i64;
+            let size : i64 = width == 0 ? 1 : width;
+            let mut cp : i32 = width <= 1 ? lead : lead & (127 >> width);
+            for (k of 1..size) {
+                cp = (cp << 6) | (Raw::u8At(base, i + k) & 63);
+            }
+            sb.appendChar(cp);
+            i = i + size;
+        }
+        return sb.toString();
+    }
+}

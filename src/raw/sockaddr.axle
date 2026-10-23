@@ -1,0 +1,35 @@
+// sockaddr — an internet address read from memory in the shape sockets give it.
+//
+// Both ports meet the same bytes: IPv4 as four bytes, IPv6 as sixteen, in network order, and the same
+// `sockaddr_in` and `sockaddr_in6` records around them. Only the number that says which family a
+// record holds differs between systems, so the caller decides that and passes it as a flag.
+
+use crate::core::netaddr::Addr;
+use crate::raw::mem::Raw;
+
+/** `sockaddr_in.sin_addr` and `sockaddr_in6.sin6_addr`: where the address bytes lie in the record. */
+const SIN_ADDR : i64 = 4;
+const SIN6_ADDR : i64 = 8;
+
+/** Addresses in memory. */
+pub class SockAddr {
+    /** The IPv4 address whose four bytes, in network order, start at `p`. */
+    pub static fn v4(p : ptr) : Addr {
+        return Addr::v4(Raw::u8At(p, 0), Raw::u8At(p, 1), Raw::u8At(p, 2), Raw::u8At(p, 3));
+    }
+
+    /** The IPv6 address whose sixteen bytes, in network order, start at `p`. */
+    pub static fn v6(p : ptr) : Addr {
+        let mut groups : i32[] = malloc<i32>(8 as i64);
+        for (k of 0..8) {
+            let at : i64 = (k as i64) * 2;
+            groups[k as i64] = (Raw::u8At(p, at) << 8) | Raw::u8At(p, at + 1);
+        }
+        return Addr::fromGroups(groups);
+    }
+
+    /** The address in the `sockaddr_in` (or, when `v6`, the `sockaddr_in6`) at `sa`. */
+    pub static fn at(sa : ptr, v6 : bool) : Addr {
+        return v6 ? SockAddr::v6(Raw::plus(sa, SIN6_ADDR)) : SockAddr::v4(Raw::plus(sa, SIN_ADDR));
+    }
+}
