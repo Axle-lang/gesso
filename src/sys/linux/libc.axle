@@ -84,7 +84,8 @@ extern "C" from "c" {
     fn freeifaddrs(list : ptr) : void;
 
     /** `int *__h_errno_location(void)` — where the resolver leaves its own error number. */
-    fn __h_errno_location() : ptr;
+    @link(symbol="__h_errno_location")
+    fn hErrnoLocation() : ptr;
 
     /** `int *__errno_location(void)` — where this thread's errno lives (glibc and musl both export it). */
     @link(symbol="__errno_location")

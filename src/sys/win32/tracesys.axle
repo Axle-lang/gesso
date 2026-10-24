@@ -15,7 +15,7 @@ pub class TraceSession {
     session : EtwSession;
 
     /** A trace over the running session `session`. */
-    constructor(session : EtwSession) {
+    constructor(own session : EtwSession) {
         self.session = session;
     }
 

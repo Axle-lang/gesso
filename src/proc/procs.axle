@@ -86,10 +86,13 @@ pub class Procs {
     pub static fn imagePaths(pids : i64[]) : ImagePaths {
         let out : ImagePaths = new ImagePaths();
         for (i of 0..pids.length) {
+            let pid : i64 = pids[i as i64];
             try {
-                out.found(pids[i as i64], ProcSys::imagePath(pids[i as i64]));
+                let path : string = ProcSys::imagePath(pid);
+                out.found(pid, path);
             } catch e : SysError {
-                out.failed(pids[i as i64], e.message);
+                let why : string = e.message;
+                out.failed(pid, why);
             }
         }
         return out;

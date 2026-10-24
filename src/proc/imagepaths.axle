@@ -34,14 +34,14 @@ pub class ImagePaths {
     }
 
     /** Record that process `pid` runs the program at `path`. */
-    pub fn found(mut self, pid : i64, path : string) : void {
+    pub fn found(mut self, own pid : i64, own path : string) : void {
         self.pids.add(pid);
         self.paths.add(path);
         self.why.add("");
     }
 
     /** Record that the program of `pid` could not be found, and why. */
-    pub fn failed(mut self, pid : i64, message : string) : void {
+    pub fn failed(mut self, own pid : i64, own message : string) : void {
         self.pids.add(pid);
         self.paths.add("");
         self.why.add(message);
@@ -137,12 +137,13 @@ pub class ImagePathCache {
     }
 
     /** Remember `path` and `why` for `info`. */
-    pub(file) fn remember(mut self, info : ProcInfo, path : string, why : string) : void {
+    pub(file) fn remember(mut self, info : ProcInfo, own path : string, own why : string) : void {
         if (self.keys.size() >= self.room) {
             self.grow();
         }
-        self.index.put(info.key, self.keys.size());
-        self.keys.add(info.key);
+        let key : i64 = info.key;
+        self.index.put(key, self.keys.size());
+        self.keys.add(key);
         self.paths.add(path);
         self.reasons.add(why);
     }
@@ -155,7 +156,8 @@ pub class ImagePathCache {
         try {
             self.remember(info, ProcSys::imagePath(info.pid), "");
         } catch e : SysError {
-            self.remember(info, "", e.message);
+            let why : string = e.message;
+            self.remember(info, "", why);
         }
     }
 

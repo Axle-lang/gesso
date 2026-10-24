@@ -68,13 +68,18 @@ pub class Machine {
     pub fn refresh(mut self) : void ! SysError {
         let procs : ProcInfo[] = Procs::list();
         let sockets : SocketTable = Net::sockets();
-        self.shape = new ProcTree(procs);
-        self.infos = procs;
-        self.table = sockets;
-        self.byPid = new PidIndex(procs.length as i32);
-        for (i of 0..procs.length) {
-            self.byPid.put(procs[i].pid, i as i32);
+        let count : i32 = procs.length as i32;
+        let mut rows : ProcInfo[] = malloc<ProcInfo>(count as i64);
+        for (i of 0..count) {
+            rows[i as i64] = procs[i as i64].copy();
         }
+        self.shape = new ProcTree(rows);
+        self.table = sockets;
+        self.byPid = new PidIndex(count);
+        for (i of 0..count) {
+            self.byPid.put(procs[i as i64].pid, i);
+        }
+        self.infos = procs;
         self.readAt = Clock::mono();
         let nowMs : i64 = Span::toMillis(self.readAt);
         if (self.dns.due(nowMs)) {

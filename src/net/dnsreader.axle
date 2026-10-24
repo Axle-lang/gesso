@@ -56,8 +56,9 @@ pub class DnsCacheReader {
                 );
                 return false;
             }
+            let answers : i32 = fresh.size();
             self.last = fresh;
-            self.now = ReadingStatus::on(SOURCE, fresh.size().toString() + " cached answers read");
+            self.now = ReadingStatus::on(SOURCE, answers.toString() + " cached answers read");
             return true;
         } catch e : Unsupported {
             self.now = ReadingStatus::unavailable(SOURCE, e.message);

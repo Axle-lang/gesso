@@ -286,8 +286,12 @@ pub class KernelNet {
         let dest : Addr = v6 ? Payload::v6(data, destAt) : Payload::v4(data, destAt);
         let src : Addr = v6 ? Payload::v6(data, srcAt) : Payload::v4(data, srcAt);
         let flip : bool = KernelNet::destinationIsLocal(kind);
-        let local : Endpoint = flip ? new Endpoint(dest, destPort) : new Endpoint(src, srcPort);
-        let remote : Endpoint = flip ? new Endpoint(src, srcPort) : new Endpoint(dest, destPort);
+        let local : Endpoint = flip
+            ? new Endpoint(dest.copy(), destPort)
+            : new Endpoint(src.copy(), srcPort);
+        let remote : Endpoint = flip
+            ? new Endpoint(src.copy(), srcPort)
+            : new Endpoint(dest.copy(), destPort);
         let moved : bool = kind == TraceKind::Send || kind == TraceKind::Receive;
         return new TraceEvent(
             kind,

@@ -39,7 +39,7 @@ pub class NetTrace {
     stopped : bool = false;
 
     /** A trace over a started session; use `start`. */
-    constructor(session : TraceSession) {
+    constructor(own session : TraceSession) {
         self.session = session;
         self.counts = new TraceCounters(KEEP);
     }

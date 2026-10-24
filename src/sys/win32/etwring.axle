@@ -94,7 +94,7 @@ pub class EtwRing {
             self.read = written - RING_SLOTS;
         }
         if (self.read >= written) {
-            return (-1, 0, malloc<i32>(1 as i64));
+            return (-1, 0 as i64, malloc<i32>(1 as i64));
         }
         let at : i64 = RING_HEADER + (self.read % RING_SLOTS) * SLOT_SIZE;
         let n : i32 = self.block.i32At(at + SLOT_LENGTH);

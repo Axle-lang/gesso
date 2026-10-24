@@ -54,7 +54,14 @@ pub class EtwSession {
     /**
      * A session `session` is running under `name` and `trace` is its consumer; `ring` receives the events.
      */
-    constructor(ring : EtwRing, name : Buf, props : Buf, logfile : Buf, session : i64, trace : i64) {
+    constructor(
+        own ring : EtwRing,
+        own name : Buf,
+        own props : Buf,
+        own logfile : Buf,
+        session : i64,
+        trace : i64
+    ) {
         self.events = ring;
         self.name = name;
         self.props = props;
