@@ -42,6 +42,7 @@ pub class FileManager {
 
     /** Open the folder `folder`: the exit code of `xdg-open`, or -1 when there is no such command. */
     pub static fn open(folder : string) : i32 {
-        return FileManager::run("xdg-open", [folder]);
+        let args : string[] = [folder];
+        return FileManager::run("xdg-open", args);
     }
 }
