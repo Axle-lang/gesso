@@ -83,10 +83,37 @@ extern "C" from "c" {
     /** `void freeifaddrs(struct ifaddrs *)`. */
     fn freeifaddrs(list : ptr) : void;
 
+    /** `int *__h_errno_location(void)` — where the resolver leaves its own error number. */
+    fn __h_errno_location() : ptr;
+
     /** `int *__errno_location(void)` — where this thread's errno lives (glibc and musl both export it). */
     @link(symbol="__errno_location")
     fn errnoLocation() : ptr;
 }
+
+extern "C" from "resolv" {
+    /**
+     * `int res_query(const char *dname, int class, int type, unsigned char *answer, int anslen)` — the
+     * length of the answer, or -1 with the reason in `h_errno`. In glibc before 2.34 this is the resolver
+     * library's; since then it is in libc, and `libresolv` is an empty stub.
+     */
+    fn res_query(name : ptr, cls : i32, kind : i32, answer : ptr, length : i32) : i32;
+}
+
+// ─── The resolver ────────────────────────────────────────────
+
+/** `C_IN`, and the record types asked for. */
+const C_IN : i32 = 1;
+const T_PTR : i32 = 12;
+const T_TXT : i32 = 16;
+
+/** `h_errno` values that mean "no such record" and "try again later". */
+const HOST_NOT_FOUND : i32 = 1;
+const TRY_AGAIN : i32 = 2;
+const NO_DATA : i32 = 4;
+
+/** The largest answer asked for: the size of a UDP answer once EDNS is in play. */
+const ANSWER_MAX : i32 = 4096;
 
 // ─── struct sysinfo field offsets (x86_64, 112 bytes) ────────
 

@@ -1,0 +1,200 @@
+// dnswire — a DNS answer as bytes, and the names a reverse or an origin lookup asks for.
+//
+//     Arpa::name(Addr::parse("93.184.216.34"))      "34.216.184.93.in-addr.arpa"
+//     Dns::firstName(answer, length)              the target of the first PTR record
+//     Dns::firstText(answer, length)              the text of the first TXT record
+//
+// A DNS message is a 12-byte header, the questions it repeats, then the answers. Names inside it are
+// runs of length-prefixed labels that may end in a *pointer* back to an earlier name, so a name is
+// never just copied: it is followed, with a limit on how many pointers it may chase so a message that
+// points at itself ends instead of looping. Everything here is bounded by the length it is given and
+// answers an empty string for a message that is cut short, refused (a non-zero response code) or has
+// no record of the kind asked for. The ports turn "empty" into the precise reason.
+
+use std::text::StringBuilder;
+use crate::core::netaddr::Addr;
+
+/** The record types read here. */
+const TYPE_PTR : i32 = 12;
+const TYPE_TXT : i32 = 16;
+
+/** The header's size, and the most pointers one name may chase. */
+const HEADER : i32 = 12;
+const MAX_JUMPS : i32 = 16;
+
+/** The longest name, in characters, taken back. */
+const NAME_MAX : i32 = 255;
+
+/** The reverse-lookup zone names. */
+pub class Arpa {
+    /** One lowercase hexadecimal digit. */
+    pub(file) static fn nibble(v : i32) : i32 {
+        return v < 10 ? 48 + v : 97 + v - 10;
+    }
+
+    /**
+     * The name whose PTR record names `addr`: `4.3.2.1.in-addr.arpa` for IPv4, the thirty-two nibbles of
+     * `ip6.arpa` for IPv6. An IPv4-mapped IPv6 address is asked for as the IPv4 address it stands for.
+     */
+    pub static fn name(addr : Addr) : string {
+        let a : Addr = addr.unmapped();
+        let sb : StringBuilder = new StringBuilder();
+        if (a.isV6()) {
+            let mut i : i32 = 15;
+            while (i >= 0) {
+                let b : i32 = a.byteAt(i);
+                sb.appendChar(Arpa::nibble(b & 15));
+                sb.append(".");
+                sb.appendChar(Arpa::nibble((b >> 4) & 15));
+                sb.append(".");
+                i = i - 1;
+            }
+            sb.append("ip6.arpa");
+            return sb.toString();
+        }
+        let mut i : i32 = 3;
+        while (i >= 0) {
+            sb.append(a.byteAt(i).toString());
+            sb.append(".");
+            i = i - 1;
+        }
+        sb.append("in-addr.arpa");
+        return sb.toString();
+    }
+}
+
+/** Reading a DNS message. */
+pub class Dns {
+    /** The 16-bit number at `at` (most significant byte first), or -1 when it lies past `len`. */
+    pub(file) static fn word(msg : i32[], len : i32, at : i32) : i32 {
+        if (at < 0 || at + 2 > len) {
+            return -1;
+        }
+        return (msg[at as i64] << 8) | msg[(at + 1) as i64];
+    }
+
+    /** Where the name that starts at `at` ends (the offset after it), or -1 when it runs off the message. */
+    pub(file) static fn skipName(msg : i32[], len : i32, at : i32) : i32 {
+        let mut i : i32 = at;
+        while (i >= 0 && i < len) {
+            let b : i32 = msg[i as i64];
+            if (b == 0) {
+                return i + 1;
+            }
+            if ((b & 192) == 192) {
+                return i + 2 <= len ? i + 2 : -1;
+            }
+            i = i + 1 + b;
+        }
+        return -1;
+    }
+
+    /** One byte as a character of a name or a text: printable ASCII as it is, anything else as `?`. */
+    pub(file) static fn printable(b : i32) : i32 {
+        return (b < 32 || b > 126) ? 63 : b;
+    }
+
+    /** The name that starts at `at`, pointers followed; empty when it is malformed. */
+    pub(file) static fn readName(msg : i32[], len : i32, at : i32) : string {
+        let sb : StringBuilder = new StringBuilder();
+        let mut i : i32 = at;
+        let mut jumps : i32 = 0;
+        let mut chars : i32 = 0;
+        let mut first : bool = true;
+        while (i >= 0 && i < len) {
+            let b : i32 = msg[i as i64];
+            if (b == 0) {
+                return sb.toString();
+            }
+            if ((b & 192) == 192) {
+                let target : i32 = Dns::word(msg, len, i);
+                if (target < 0 || jumps == MAX_JUMPS) {
+                    return "";
+                }
+                jumps = jumps + 1;
+                i = target & 16383;
+            } else if ((b & 192) != 0 || i + 1 + b > len || chars + b + 1 > NAME_MAX) {
+                return "";
+            } else {
+                if (!first) {
+                    sb.append(".");
+                }
+                first = false;
+                for (k of 0..b) {
+                    sb.appendChar(Dns::printable(msg[(i + 1 + k) as i64]));
+                }
+                chars = chars + b + 1;
+                i = i + 1 + b;
+            }
+        }
+        return "";
+    }
+
+    /**
+     * The data of the first answer of `kind`, as (start, length) in `msg`; (-1, 0) when there is none, the
+     * message is cut short or its response code is not 0.
+     */
+    pub(file) static fn firstAnswer(msg : i32[], len : i32, kind : i32) : (at: i32, size: i32) {
+        if (len < HEADER || (msg[3 as i64] & 15) != 0) {
+            return (-1, 0);
+        }
+        let questions : i32 = Dns::word(msg, len, 4);
+        let answers : i32 = Dns::word(msg, len, 6);
+        let mut at : i32 = HEADER;
+        for (q of 0..questions) {
+            at = Dns::skipName(msg, len, at);
+            if (at < 0) {
+                return (-1, 0);
+            }
+            at = at + 4;
+        }
+        for (a of 0..answers) {
+            at = Dns::skipName(msg, len, at);
+            if (at < 0 || at + 10 > len) {
+                return (-1, 0);
+            }
+            let rtype : i32 = Dns::word(msg, len, at);
+            let rdlen : i32 = Dns::word(msg, len, at + 8);
+            let start : i32 = at + 10;
+            if (rdlen < 0 || start + rdlen > len) {
+                return (-1, 0);
+            }
+            if (rtype == kind) {
+                return (start, rdlen);
+            }
+            at = start + rdlen;
+        }
+        return (-1, 0);
+    }
+
+    /** The target of the first PTR record in the answer, or an empty string. */
+    pub static fn firstName(msg : i32[], len : i32) : string {
+        let (at, size) = Dns::firstAnswer(msg, len, TYPE_PTR);
+        return at < 0 ? "" : Dns::readName(msg, len, at);
+    }
+
+    /**
+     * The text of the first TXT record in the answer, or an empty string. A record is a run of
+     * length-prefixed strings that read as one text, as RFC 1464 says; they are joined.
+     */
+    pub static fn firstText(msg : i32[], len : i32) : string {
+        let (at, size) = Dns::firstAnswer(msg, len, TYPE_TXT);
+        if (at < 0) {
+            return "";
+        }
+        let sb : StringBuilder = new StringBuilder();
+        let mut i : i32 = at;
+        let end : i32 = at + size;
+        while (i < end) {
+            let n : i32 = msg[i as i64];
+            if (i + 1 + n > end) {
+                return sb.toString();
+            }
+            for (k of 0..n) {
+                sb.appendChar(Dns::printable(msg[(i + 1 + k) as i64]));
+            }
+            i = i + 1 + n;
+        }
+        return sb.toString();
+    }
+}

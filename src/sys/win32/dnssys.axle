@@ -1,0 +1,77 @@
+// sys/dnssys — the resolver, on Windows: its cache, and PTR and TXT lookups through `DnsQuery_W`.
+//
+// The cache is read in two steps. `DnsGetCacheDataTable` lists the names currently cached; each is then
+// asked for with `DNS_QUERY_NO_WIRE_QUERY`, which answers from the cache alone and sends nothing to the
+// network, to learn the addresses it holds. Turning `name → addresses` around gives `address → name`.
+//
+// Both walks are bounded and a list that points at itself is not followed. Every record handed back by
+// the table is released, including those past the limit that are not asked about: stopping the walk early
+// would leak the tail of the list on every sweep.
+
+use crate::core::dnsinfo::DnsCache;
+use crate::sys::dnsrecords::{DnsRecords, NAME_UNITS};
+use crate::core::error::SysError;
+use crate::core::netaddr::Addr;
+use crate::sys::errno::Errno;
+use crate::sys::dnsapi::{
+    DnsGetCacheDataTable, DnsQuery_W, DnsRecordListFree, DnsFree, CACHE_ENTRY, CACHE_NEXT, CACHE_NAME,
+    CACHE_TYPE, REC_NEXT, REC_TYPE, REC_DATA, REC_TXT_COUNT, REC_TXT_FIRST, DNS_TYPE_A, DNS_TYPE_PTR,
+    DNS_TYPE_TEXT, DNS_TYPE_AAAA, DNS_QUERY_NO_WIRE_QUERY, DNS_FREE_FLAT, DNS_FREE_RECORD_LIST,
+    DNS_ERROR_RCODE_NAME_ERROR, DNS_INFO_NO_RECORDS, DNS_ERROR_RECORD_DOES_NOT_EXIST,
+};
+use crate::raw::mem::Raw;
+use crate::raw::buf::Buf;
+use crate::raw::wide::Wide;
+
+/** Cached names asked about per sweep; the rest of the list is only released. */
+const MAX_NAMES : i32 = 4096;
+
+/** A list longer than this is a corrupt one. */
+const MAX_WALK : i32 = 1048576;
+
+/** The resolver. */
+pub class DnsSys {
+    /**
+     * What the resolver's cache holds, as (name, address) pairs; the reading says whether the system
+     * answered.
+     */
+    pub static fn cache() : DnsCache ! SysError {
+        let head : Buf = new Buf(CACHE_ENTRY);
+        if (DnsGetCacheDataTable(head.ptr()) == 0) {
+            return new DnsCache(false);
+        }
+        let out : DnsCache = new DnsCache(true);
+        let mut entry : ptr = Raw::ptrAt(head.ptr(), CACHE_NEXT);
+        let mut walked : i32 = 0;
+        while (!Raw::isNil(entry) && walked < MAX_WALK) {
+            // The next pointer is read before the record is released.
+            let next : ptr = DnsRecords::after(entry, CACHE_NEXT);
+            let kind : i32 = Raw::u16At(entry, CACHE_TYPE);
+            let nameAt : ptr = Raw::ptrAt(entry, CACHE_NAME);
+            let isAddress : bool = kind == DNS_TYPE_A || kind == DNS_TYPE_AAAA;
+            if (walked < MAX_NAMES && !Raw::isNil(nameAt) && isAddress) {
+                let name : string = Wide::read(nameAt, NAME_UNITS);
+                if (name.byteLength > 0) {
+                    DnsRecords::learn(out, name, Wide::alloc(name), kind);
+                }
+            }
+            if (!Raw::isNil(nameAt)) {
+                DnsFree(nameAt, DNS_FREE_FLAT);
+            }
+            DnsFree(entry, DNS_FREE_FLAT);
+            entry = next;
+            walked = walked + 1;
+        }
+        return out;
+    }
+
+    /** The PTR record at the reverse-zone name `arpa`; empty when there is none. This goes to the network. */
+    pub static fn reverse(arpa : string) : string ! SysError {
+        return DnsRecords::query("net.reverse", arpa, DNS_TYPE_PTR);
+    }
+
+    /** The TXT record at `name`, its strings joined; empty when there is none. This goes to the network. */
+    pub static fn txt(name : string) : string ! SysError {
+        return DnsRecords::query("net.txt", name, DNS_TYPE_TEXT);
+    }
+}

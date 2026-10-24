@@ -1,0 +1,110 @@
+// sys/dnsrecords — walking the resolver's records, for the Windows DNS seam.
+//
+// A `DNS_RECORD` chain is read by offset and released with `DnsRecordListFree`; this file is every place
+// those offsets are used, so the seam above it reads as a sequence of questions.
+
+use crate::core::dnsinfo::{DnsCache, DnsEntry};
+use crate::core::error::SysError;
+use crate::sys::errno::Errno;
+use crate::sys::dnsapi::{
+    DnsQuery_W, DnsRecordListFree, REC_NEXT, REC_TYPE, REC_DATA, REC_TXT_COUNT, REC_TXT_FIRST, DNS_TYPE_A,
+    DNS_TYPE_PTR, DNS_TYPE_AAAA, DNS_QUERY_NO_WIRE_QUERY, DNS_FREE_RECORD_LIST, DNS_ERROR_RCODE_NAME_ERROR,
+    DNS_INFO_NO_RECORDS, DNS_ERROR_RECORD_DOES_NOT_EXIST,
+};
+use crate::raw::mem::Raw;
+use crate::raw::buf::Buf;
+use crate::raw::sockaddr::SockAddr;
+use crate::raw::wide::Wide;
+
+/** The longest name taken back, in UTF-16 units. */
+const NAME_UNITS : i32 = 255;
+
+/** Records read from one answer. */
+const MAX_RECORDS : i32 = 64;
+
+/** Records. */
+pub class DnsRecords {
+    /** The next record of a chain, or nil when it ends or points at itself. */
+    pub static fn after(rec : ptr, offset : i64) : ptr {
+        let next : ptr = Raw::ptrAt(rec, offset);
+        return Raw::addr(next) == Raw::addr(rec) ? Raw::nil() : next;
+    }
+
+    /** Add to `out` what the cache holds for `name`, an address record of `kind`. */
+    pub static fn learn(out : DnsCache, name : string, wide : Buf, kind : i32) : void {
+        let slot : Buf = new Buf(8);
+        let status : i32 = DnsQuery_W(
+            wide.ptr(), kind, DNS_QUERY_NO_WIRE_QUERY, Raw::nil(), slot.ptr(), Raw::nil()
+        );
+        if (status != 0) {
+            return;
+        }
+        let records : ptr = Raw::ptrAt(slot.ptr(), 0);
+        let mut rec : ptr = records;
+        let mut walked : i32 = 0;
+        while (!Raw::isNil(rec) && walked < MAX_RECORDS) {
+            let rtype : i32 = Raw::u16At(rec, REC_TYPE);
+            if (rtype == DNS_TYPE_A) {
+                out.add(new DnsEntry(name, SockAddr::v4(Raw::plus(rec, REC_DATA))));
+            } else if (rtype == DNS_TYPE_AAAA) {
+                out.add(new DnsEntry(name, SockAddr::v6(Raw::plus(rec, REC_DATA))));
+            }
+            rec = DnsRecords::after(rec, REC_NEXT);
+            walked = walked + 1;
+        }
+        if (!Raw::isNil(records)) {
+            DnsRecordListFree(records, DNS_FREE_RECORD_LIST);
+        }
+    }
+
+    /** The text of the first record of `kind` in the list `records`, or an empty string. */
+    pub static fn firstText(records : ptr, kind : i32) : string {
+        let mut rec : ptr = records;
+        let mut walked : i32 = 0;
+        while (!Raw::isNil(rec) && walked < MAX_RECORDS) {
+            if (Raw::u16At(rec, REC_TYPE) == kind) {
+                if (kind == DNS_TYPE_PTR) {
+                    let target : ptr = Raw::ptrAt(rec, REC_DATA);
+                    return Raw::isNil(target) ? "" : Wide::read(target, NAME_UNITS);
+                }
+                // A TXT record is a count and an array of string pointers: they read as one text.
+                let count : i32 = Raw::i32At(rec, REC_TXT_COUNT);
+                let mut text : string = "";
+                for (i of 0..(count < 16 ? count : 16)) {
+                    let part : ptr = Raw::ptrAt(rec, REC_TXT_FIRST + (i as i64) * 8);
+                    text = text + (Raw::isNil(part) ? "" : Wide::read(part, NAME_UNITS));
+                }
+                return text;
+            }
+            rec = DnsRecords::after(rec, REC_NEXT);
+            walked = walked + 1;
+        }
+        return "";
+    }
+
+    /**
+     * One resolver round trip for `name`: the first record of `kind` as text, or "" when there is no such
+     * record.
+     */
+    pub static fn query(op : string, name : string, kind : i32) : string ! SysError {
+        let wide : Buf = Wide::alloc(name);
+        let slot : Buf = new Buf(8);
+        let status : i32 = DnsQuery_W(wide.ptr(), kind, 0, Raw::nil(), slot.ptr(), Raw::nil());
+        if (
+            status == DNS_ERROR_RCODE_NAME_ERROR
+            || status == DNS_INFO_NO_RECORDS
+            || status == DNS_ERROR_RECORD_DOES_NOT_EXIST
+        ) {
+            return "";
+        }
+        if (status != 0) {
+            Errno::win32(op, name, status);
+        }
+        let records : ptr = Raw::ptrAt(slot.ptr(), 0);
+        let answer : string = DnsRecords::firstText(records, kind);
+        if (!Raw::isNil(records)) {
+            DnsRecordListFree(records, DNS_FREE_RECORD_LIST);
+        }
+        return answer;
+    }
+}

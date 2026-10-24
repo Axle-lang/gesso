@@ -1,0 +1,39 @@
+// sys/dnssys — the resolver, on Linux: PTR and TXT lookups through `res_query`.
+//
+// The resolver's own cache is not readable: a plain glibc system keeps none, and `systemd-resolved`, which
+// does, holds it behind D-Bus. `cache` therefore says `Unsupported`, naming the reason, and a program that
+// wants names for addresses uses the reverse lookup instead.
+//
+// `res_query` answers the raw DNS message; reading it is `core/dnswire`, which is checked on real messages
+// without a network. The message's response code and the lookup's own `h_errno` both mean "no such record"
+// in different words, and both come back from here as an empty string, which `Net` turns into `Absent`.
+
+use crate::core::dnsinfo::DnsCache;
+use crate::core::dnswire::Dns;
+use crate::core::error::{SysError, Unsupported};
+use crate::sys::libc::{T_PTR, T_TXT};
+use crate::sys::resolver::Resolver;
+
+/** The resolver. */
+pub class DnsSys {
+    /** The resolver's cache: not readable here. */
+    pub static fn cache() : DnsCache ! SysError {
+        throw Unsupported(
+            "net.dnsCache",
+            "linux",
+            "the system resolver keeps no cache a program may read (systemd-resolved holds one behind D-Bus)"
+        );
+    }
+
+    /** The PTR record at the reverse-zone name `arpa`; empty when there is none. This goes to the network. */
+    pub static fn reverse(arpa : string) : string ! SysError {
+        let message : i32[] = Resolver::ask("net.reverse", arpa, T_PTR);
+        return Dns::firstName(message, message.length as i32 - 1);
+    }
+
+    /** The TXT record at `name`, its strings joined; empty when there is none. This goes to the network. */
+    pub static fn txt(name : string) : string ! SysError {
+        let message : i32[] = Resolver::ask("net.txt", name, T_TXT);
+        return Dns::firstText(message, message.length as i32 - 1);
+    }
+}

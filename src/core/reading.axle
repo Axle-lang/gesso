@@ -1,0 +1,88 @@
+// reading — whether a source of information is being read, and if not, why.
+//
+// A program that reads the network several ways — the connection tables, the resolver's cache, a kernel
+// trace — has to tell its reader which of them is running. A column that is empty because nothing
+// happened and a column that is empty because nothing measures it look the same, and the second must
+// never be mistaken for the first. A `ReadingStatus` says which, in a sentence.
+//
+//   On    running, and its readings are in use
+//   Off   could not start, or this platform does not have it; `note` says which and why
+//   Lost  started, and then stopped answering — or answered with nothing, which is not the same as being
+//         told there is nothing; it is asked again
+
+/** What a reading is doing. */
+pub enum ReadingState : i32 {
+    /** Running. */
+    On = 0,
+
+    /** Not running, and the note says why. */
+    Off = 1,
+
+    /** It was answering and no longer is. */
+    Lost = 2,
+
+    /** Its name in a sentence. */
+    pub fn label(self) : string {
+        return match self {
+            ReadingState::On => "on",
+            ReadingState::Off => "off",
+            ReadingState::Lost => "lost",
+        };
+    }
+}
+
+/** The state of one source of readings. */
+pub class ReadingStatus {
+    /** What is read: "dns cache", "kernel trace". */
+    pub name : string;
+
+    /** What it is doing. */
+    pub state : ReadingState;
+
+    /** A sentence for a tooltip or a status bar. */
+    pub note : string;
+
+    /**
+     * Whether this platform can do it at all: `false` is permanent, unlike `Off`, which may be a refusal that
+     * a privilege would lift.
+     */
+    pub capable : bool;
+
+    /** A status. */
+    constructor(name : string, state : ReadingState, note : string, capable : bool) {
+        self.name = name;
+        self.state = state;
+        self.note = note;
+        self.capable = capable;
+    }
+
+    /** `name` is being read. */
+    pub static fn on(name : string, note : string) : ReadingStatus {
+        return new ReadingStatus(name, ReadingState::On, note, true);
+    }
+
+    /** `name` is not being read, for a reason that may pass (a refusal, a stopped service). */
+    pub static fn off(name : string, note : string) : ReadingStatus {
+        return new ReadingStatus(name, ReadingState::Off, note, true);
+    }
+
+    /** `name` is not being read and cannot be on this platform. */
+    pub static fn unavailable(name : string, note : string) : ReadingStatus {
+        return new ReadingStatus(name, ReadingState::Off, note, false);
+    }
+
+    /** `name` stopped answering. */
+    pub static fn lost(name : string, note : string) : ReadingStatus {
+        return new ReadingStatus(name, ReadingState::Lost, note, true);
+    }
+
+    /** Whether it is running. */
+    pub fn isOn(self) : bool {
+        return self.state == ReadingState::On;
+    }
+
+    /** One line: "dns cache: on — reading this machine's DNS cache". */
+    pub fn describe(self) : string {
+        return self.name + ": " + self.state.label() + " — " + self.note;
+    }
+}

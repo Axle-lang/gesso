@@ -1,0 +1,160 @@
+// asinfo — which network announces an address, as Team Cymru's DNS zones say it.
+//
+// Team Cymru publish the routing table as DNS, the oldest trick in network operations and still the right
+// one for a program that cannot speak TLS: two lookups, no key, nothing to register.
+//
+//   34.216.184.93.origin.asn.cymru.com  TXT  "15133 | 93.184.216.0/24 | US | arin | 2008-06-02"
+//   AS15133.asn.cymru.com               TXT  "15133 | US | arin | 2008-06-02 | EDGECAST, US"
+//
+// The names to ask for, and the reading of the two answers, are here; asking is `Net::origin`.
+
+use std::text::StringBuilder;
+use crate::core::netaddr::Addr;
+use crate::core::scan::Scan;
+use crate::core::text::Utf8;
+
+/** The network that announces an address. */
+pub class AsOrigin {
+    /** The autonomous system number; 0 when the answer could not be read. */
+    pub asn : i64;
+
+    /** The announced prefix: "93.184.216.0/24". */
+    pub prefix : string;
+
+    /** The two-letter country code of the registration. */
+    pub country : string;
+
+    /** The registry: "arin", "ripencc". */
+    pub registry : string;
+
+    /** The network's name: "EDGECAST, US"; empty until the second lookup has been read. */
+    pub name : string;
+
+    /** An origin reading. */
+    constructor(asn : i64, prefix : string, country : string, registry : string, name : string) {
+        self.asn = asn;
+        self.prefix = prefix;
+        self.country = country;
+        self.registry = registry;
+        self.name = name;
+    }
+
+    /** Whether the answer was understood. */
+    pub fn isKnown(self) : bool {
+        return self.asn > 0;
+    }
+
+    /** "AS15133 EDGECAST, US", or "AS15133" when the name is not known. */
+    pub fn title(self) : string {
+        let base : string = "AS" + self.asn.toString();
+        return self.name.byteLength > 0 ? base + " " + self.name : base;
+    }
+}
+
+/** Team Cymru's names and answers. */
+pub class Cymru {
+    /** The zone name that answers "which network announces `addr`". */
+    pub static fn originName(addr : Addr) : string {
+        let a : Addr = addr.unmapped();
+        let sb : StringBuilder = new StringBuilder();
+        if (a.isV6()) {
+            let digits : string = "0123456789abcdef";
+            let mut i : i32 = 15;
+            while (i >= 0) {
+                let b : i32 = a.byteAt(i);
+                sb.appendChar(digits.byteAt((b & 15) as i64));
+                sb.append(".");
+                sb.appendChar(digits.byteAt(((b >> 4) & 15) as i64));
+                sb.append(".");
+                i = i - 1;
+            }
+            sb.append("origin6.asn.cymru.com");
+            return sb.toString();
+        }
+        let mut i : i32 = 3;
+        while (i >= 0) {
+            sb.append(a.byteAt(i).toString());
+            sb.append(".");
+            i = i - 1;
+        }
+        sb.append("origin.asn.cymru.com");
+        return sb.toString();
+    }
+
+    /** The zone name that answers "what is network `asn` called". */
+    pub static fn asName(asn : i64) : string {
+        return "AS" + asn.toString() + ".asn.cymru.com";
+    }
+
+    /** The `n`th (0-based) field of `text`, split at `|` and trimmed; empty when there is none. */
+    pub(file) static fn field(text : string, n : i32) : string {
+        let mut start : i64 = 0;
+        let mut seen : i32 = 0;
+        let len : i64 = text.byteLength;
+        let mut i : i64 = 0;
+        while (i <= len) {
+            if (i == len || text.byteAt(i) == 124) {
+                if (seen == n) {
+                    return Cymru::trim(text, start, i);
+                }
+                seen = seen + 1;
+                start = i + 1;
+            }
+            i = i + 1;
+        }
+        return "";
+    }
+
+    /** Bytes `a` .. `b` of `s` without the blanks at either end. */
+    pub(file) static fn trim(s : string, a : i64, b : i64) : string {
+        let mut lo : i64 = a;
+        let mut hi : i64 = b;
+        while (lo < hi && Scan::isBlank(s.byteAt(lo))) {
+            lo = lo + 1;
+        }
+        while (hi > lo && Scan::isBlank(s.byteAt(hi - 1))) {
+            hi = hi - 1;
+        }
+        return Utf8::slice(s, lo, hi);
+    }
+
+    /**
+     * The first number in `field`: a prefix announced by several networks answers with them separated by
+     * spaces ("7018 3356"), all of them right, and a row that named three networks for one address would
+     * say something nobody can act on. 0 when there is none, or it has more than nine digits.
+     */
+    pub(file) static fn firstNumber(field : string) : i64 {
+        let mut i : i64 = 0;
+        while (i < field.byteLength && (field.byteAt(i) < 48 || field.byteAt(i) > 57)) {
+            i = i + 1;
+        }
+        let first : i64 = i;
+        while (i < field.byteLength && field.byteAt(i) >= 48 && field.byteAt(i) <= 57) {
+            i = i + 1;
+        }
+        if (i == first || i - first > 9) {
+            return 0;
+        }
+        return Scan::dec(field, first, i);
+    }
+
+    /** Read the answer to an origin lookup: "15133 | 93.184.216.0/24 | US | arin | 2008-06-02". */
+    pub static fn parseOrigin(text : string) : AsOrigin {
+        return new AsOrigin(
+            Cymru::firstNumber(Cymru::field(text, 0)),
+            Cymru::field(text, 1),
+            Cymru::field(text, 2),
+            Cymru::field(text, 3),
+            ""
+        );
+    }
+
+    /**
+     * `origin` with the name the answer to the AS lookup gives: "15133 | US | arin | 2008-06-02 | EDGECAST,
+     * US".
+     */
+    pub static fn named(origin : AsOrigin, text : string) : AsOrigin {
+        let name : string = Cymru::field(text, 4);
+        return new AsOrigin(origin.asn, origin.prefix, origin.country, origin.registry, name);
+    }
+}

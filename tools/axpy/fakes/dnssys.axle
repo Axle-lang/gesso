@@ -1,0 +1,40 @@
+// fakes/dnssys — the `sys::dnssys` seam as the tests see it: a resolver with a few fixed answers.
+//
+// The same public shape as the two ports. The cache holds three names; the reverse lookup knows two
+// addresses; the TXT lookup answers for one origin and its network. Everything else has no record, which a
+// seam says with an empty string.
+
+use crate::core::dnsinfo::{DnsCache, DnsEntry};
+use crate::core::error::SysError;
+use crate::core::netaddr::Addr;
+
+/** A resolver that is always the same. */
+pub class DnsSys {
+    pub static fn cache() : DnsCache ! SysError {
+        let c : DnsCache = new DnsCache(true);
+        c.add(new DnsEntry("api.stripe.com", Addr::parse("52.1.2.3")));
+        c.add(new DnsEntry("cdn.example.net", Addr::parse("93.184.216.34")));
+        c.add(new DnsEntry("v6.example", Addr::parse("2001:db8::7")));
+        return c;
+    }
+
+    pub static fn reverse(arpa : string) : string ! SysError {
+        if (arpa == "34.216.184.93.in-addr.arpa") {
+            return "edge.example.net";
+        }
+        if (arpa == "1.1.168.192.in-addr.arpa") {
+            return "router.lan";
+        }
+        return "";
+    }
+
+    pub static fn txt(name : string) : string ! SysError {
+        if (name == "34.216.184.93.origin.asn.cymru.com") {
+            return "15133 | 93.184.216.0/24 | US | arin | 2008-06-02";
+        }
+        if (name == "AS15133.asn.cymru.com") {
+            return "15133 | US | arin | 2008-06-02 | EDGECAST, US";
+        }
+        return "";
+    }
+}

@@ -1,0 +1,130 @@
+// dnsinfo — what the machine's resolver remembers: the names it was asked for and the addresses it found.
+//
+//     let cache : DnsCache = Net::dnsCache();
+//     cache.nameOf(Addr::parse("93.184.216.34"))        "example.com"
+//
+// A reverse record says what an address's *owner* chose to publish; for a content network that is a
+// machine number (`a23-45-67-89.deploy.static.akamaitechnologies.com`) that is true and tells a reader
+// nothing. The resolver's cache says what *a program on this machine typed* — `api.stripe.com` — which is
+// what they meant. The cache is a list of names with their addresses; turned around it answers "which
+// name did we ask for to get here".
+
+use crate::core::list::{List, Copy};
+use crate::core::netaddr::Addr;
+use crate::core::text::Utf8;
+
+/** One cached answer: `name` resolved to `addr`. */
+pub class DnsEntry : Copy<DnsEntry> {
+    /** What was asked for. */
+    pub name : string;
+
+    /** What it resolved to. */
+    pub addr : Addr;
+
+    /** An answer that `name` is at `addr`. */
+    constructor(name : string, own addr : Addr) {
+        self.name = name;
+        self.addr = addr;
+    }
+
+    /** A separate object with the same answer. */
+    pub fn copy(self) : DnsEntry {
+        return new DnsEntry(self.name, self.addr.copy());
+    }
+}
+
+/** The names the resolver holds, with their addresses. */
+pub class DnsCache {
+    rows : List<DnsEntry>;
+    heard : bool;
+
+    /**
+     * An empty reading; `heard` is whether the system answered at all (an empty cache and a refusal look
+     * alike to some systems).
+     */
+    constructor(heard : bool) {
+        self.rows = new List<DnsEntry>();
+        self.heard = heard;
+    }
+
+    /** Add a copy of `entry` at the end. */
+    pub fn add(mut self, entry : DnsEntry) : void {
+        self.rows.add(entry.copy());
+    }
+
+    /** How many (name, address) pairs there are. */
+    pub fn size(self) : i32 {
+        return self.rows.size();
+    }
+
+    /** The pair at position `i`. */
+    pub fn at(self, i : i32) : DnsEntry {
+        return self.rows.at(i);
+    }
+
+    /**
+     * Whether the system answered when it was asked. When it did not, the reading is empty and says nothing
+     * about the cache.
+     */
+    pub fn answered(self) : bool {
+        return self.heard;
+    }
+
+    /** The first name the cache holds for `addr`, or an empty string. */
+    pub fn nameOf(self, addr : Addr) : string {
+        for (i of 0..self.rows.size()) {
+            if (self.rows.at(i).addr.equals(addr)) {
+                return self.rows.at(i).name;
+            }
+        }
+        return "";
+    }
+
+    /** Whether the cache holds a name for `addr`. */
+    pub fn knows(self, addr : Addr) : bool {
+        return self.nameOf(addr).byteLength > 0;
+    }
+
+    /** Every name the cache holds for `addr`, each once, in the order cached. */
+    pub fn namesOf(self, addr : Addr) : string[] {
+        let found : List<DnsEntry> = new List<DnsEntry>();
+        for (i of 0..self.rows.size()) {
+            let e : DnsEntry = self.rows.at(i);
+            if (e.addr.equals(addr)) {
+                let mut seen : bool = false;
+                for (k of 0..found.size()) {
+                    if (Utf8::sameFolded(found.at(k).name, e.name)) {
+                        seen = true;
+                    }
+                }
+                if (!seen) {
+                    found.add(e.copy());
+                }
+            }
+        }
+        let mut out : string[] = malloc<string>(found.size() as i64);
+        for (k of 0..found.size()) {
+            out[k as i64] = found.at(k).name;
+        }
+        return out;
+    }
+
+    /** The addresses the cache holds for `name`, capitals not told apart, in the order cached. */
+    pub fn addressesOf(self, name : string) : Addr[] {
+        let mut n : i32 = 0;
+        for (i of 0..self.rows.size()) {
+            if (Utf8::sameFolded(self.rows.at(i).name, name)) {
+                n = n + 1;
+            }
+        }
+        let mut out : Addr[] = malloc<Addr>(n as i64);
+        let mut k : i32 = 0;
+        for (i of 0..self.rows.size()) {
+            if (Utf8::sameFolded(self.rows.at(i).name, name)) {
+                out[k as i64] = self.rows.at(i).addr.copy();
+                k = k + 1;
+            }
+        }
+        return out;
+    }
+}

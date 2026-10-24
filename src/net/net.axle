@@ -11,10 +11,16 @@
 // and for every process only from an elevated session on Linux (Windows says it to everyone). A socket
 // whose owner cannot be seen has `pid` -1; `SocketTable::unowned()` counts them.
 
-use crate::core::error::{SysError, Absent};
+use crate::core::error::{SysError, Absent, Invalid};
+use crate::core::support::Support;
 use crate::core::netaddr::Addr;
+use crate::core::dnsinfo::DnsCache;
+use crate::core::dnswire::Arpa;
+use crate::core::asinfo::{AsOrigin, Cymru};
 use crate::core::netinfo::{SocketTable, IfaceInfo, IfaceTable, IfaceKind, RouteInfo, RouteTable};
 use crate::sys::netsys::NetSys;
+use crate::sys::dnssys::DnsSys;
+use crate::sys::os::Os;
 
 /** The network. */
 pub class Net {
@@ -109,5 +115,66 @@ pub class Net {
             }
         }
         return (rx, tx);
+    }
+
+    /**
+     * The names this machine's resolver has cached, with their addresses: what programs on it *asked for*,
+     * which says more than what an address's owner publishes (`cache.nameOf(addr)`). Nothing is sent to the
+     * network. `Unsupported` where the system keeps no cache a program may read (Linux).
+     */
+    pub static fn dnsCache() : DnsCache ! SysError {
+        return DnsSys::cache();
+    }
+
+    /** Whether `dnsCache` can be read here. */
+    pub static fn canReadDnsCache() : Support {
+        if (Os::name() == "linux") {
+            return Support::unsupported("the system resolver keeps no cache a program may read");
+        }
+        return Support::unknown(
+            "an undocumented interface: it may refuse, and an empty cache reads like a refusal"
+        );
+    }
+
+    /**
+     * The name the owner of `addr` publishes for it (its PTR record). This asks a DNS server and can take
+     * seconds: run it off the thread that draws. `Absent` when there is no such record.
+     */
+    pub static fn reverse(addr : Addr) : string ! SysError {
+        let name : string = DnsSys::reverse(Arpa::name(addr));
+        if (name.byteLength == 0) {
+            throw Absent("net.reverse", "name published for " + addr.text());
+        }
+        return name;
+    }
+
+    /** The text record at `name`, its strings joined. Asks a DNS server; `Absent` when there is none. */
+    pub static fn txt(name : string) : string ! SysError {
+        let text : string = DnsSys::txt(name);
+        if (text.byteLength == 0) {
+            throw Absent("net.txt", "text record at " + name);
+        }
+        return text;
+    }
+
+    /**
+     * The network that announces `addr`, from Team Cymru's DNS zones (two lookups, no key, no TLS). The name
+     * of the network is a second lookup: when only that one fails the answer has the number and no name
+     * (`name` is empty, `title()` shows the number alone). `Absent` when nothing announces the address.
+     */
+    pub static fn origin(addr : Addr) : AsOrigin ! SysError {
+        let answer : string = DnsSys::txt(Cymru::originName(addr));
+        if (answer.byteLength == 0) {
+            throw Absent("net.origin", "network announcing " + addr.text());
+        }
+        let origin : AsOrigin = Cymru::parseOrigin(answer);
+        if (!origin.isKnown()) {
+            throw Invalid("net.origin", answer, "not an origin answer");
+        }
+        try {
+            return Cymru::named(origin, DnsSys::txt(Cymru::asName(origin.asn)));
+        } catch e : SysError {
+            return origin;
+        }
     }
 }

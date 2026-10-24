@@ -1,0 +1,39 @@
+// sys/resolver — one `res_query` round trip, for the Linux DNS seam.
+
+use crate::core::error::{SysError, Expired, OsFailure};
+use crate::sys::libc::{res_query, __h_errno_location, C_IN, HOST_NOT_FOUND, TRY_AGAIN, NO_DATA, ANSWER_MAX};
+use crate::raw::mem::Raw;
+use crate::raw::buf::Buf;
+use crate::raw::wide::Narrow;
+
+/**
+ * How long the resolver library waits for a server by default, in milliseconds; reported when it gives up.
+ */
+const RESOLVER_WAIT_MS : i64 = 5000;
+
+/** The resolver library. */
+pub class Resolver {
+    /** One resolver round trip: the answer as a DNS message, or an empty one when there is no such record. */
+    pub static fn ask(op : string, name : string, kind : i32) : i32[] ! SysError {
+        let asked : Buf = Narrow::alloc(name);
+        let answer : Buf = new Buf(ANSWER_MAX);
+        Raw::putI32(__h_errno_location(), 0, 0);
+        let got : i32 = res_query(asked.ptr(), C_IN, kind, answer.ptr(), ANSWER_MAX);
+        if (got < 0) {
+            let why : i32 = Raw::i32At(__h_errno_location(), 0);
+            if (why == HOST_NOT_FOUND || why == NO_DATA) {
+                return malloc<i32>(1 as i64);
+            }
+            if (why == TRY_AGAIN) {
+                throw Expired(op, RESOLVER_WAIT_MS);
+            }
+            throw OsFailure(op, why, "h_errno");
+        }
+        let n : i32 = got < ANSWER_MAX ? got : ANSWER_MAX;
+        let mut message : i32[] = malloc<i32>((n + 1) as i64);
+        for (i of 0..n) {
+            message[i as i64] = answer.u8At(i as i64);
+        }
+        return message;
+    }
+}

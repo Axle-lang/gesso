@@ -18,18 +18,19 @@
 //   desk     notifications, clipboard, hotkeys, windows, the session
 //   diag     logs, events, crash reports, counters
 use crate::core::{
-    addrtext, clock, error, fsinfo, fsparse, fswatch, guard, ident, index, list, netaddr, netinfo,
-    netparse, plan, privilege, process, procstat, scan, support, sysinfo, text, units, watch,
+    addrtext, asinfo, clock, dnsinfo, dnswire, error, fsinfo, fsparse, fswatch, guard, ident, index,
+    list, netaddr, netinfo, netparse, plan, privilege, process, procstat, reading, scan, support,
+    sysinfo, text, units, watch,
 };
 
 use crate::raw::{buf, mem, sockaddr, wide};
 
-use crate::sys::{errno, fssys, netsys, os, procsys, syssys};
+use crate::sys::{dnssys, errno, fssys, netsys, os, procsys, syssys};
 
 use crate::system::{cpu, host};
 
 use crate::proc::{procs, tree};
 
-use crate::net::{net, traffic};
+use crate::net::{dnsreader, net, traffic};
 
 use crate::fs::{fs};

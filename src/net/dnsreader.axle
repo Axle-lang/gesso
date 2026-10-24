@@ -1,0 +1,86 @@
+// dnsreader — the resolver's cache, read on a schedule, with a status a window can show.
+//
+//     let dns : DnsCacheReader = new DnsCacheReader(5000);
+//     loop {
+//         if (dns.due(nowMs)) { dns.sweep(nowMs); }
+//         let name : string = dns.nameOf(addr);
+//         … dns.status().describe() …
+//     }
+//
+// A program that shows names beside addresses has to read the cache again and again, and has to say when
+// it cannot: a name column that is empty because nothing was asked for and one that is empty because the
+// cache is unreadable look the same, and must not. The reader keeps the last good reading, so a sweep that
+// fails does not blank the names already on screen, and its `status` says which of the three it is.
+//
+// Windows answers "no" for an empty cache exactly as for a refusal, and a cache that is empty right after
+// `ipconfig /flushdns` fills up again within a minute. So an answer of nothing is `Lost`, not `Off`: the
+// next sweep asks again. Only a platform with no such cache (`Unsupported`) is off for good.
+
+use crate::core::dnsinfo::DnsCache;
+use crate::core::error::{SysError, Unsupported, Denied};
+use crate::core::netaddr::Addr;
+use crate::core::reading::ReadingStatus;
+use crate::sys::dnssys::DnsSys;
+
+/** A source: the name of what is read. */
+const SOURCE : string = "dns cache";
+
+/** The resolver's cache, kept up to date. */
+pub class DnsCacheReader {
+    last : DnsCache;
+    now : ReadingStatus;
+    interval : i64;
+    nextAt : i64 = 0;
+
+    /** A reader that sweeps every `intervalMs` milliseconds, or whenever `sweep` is called. */
+    constructor(intervalMs : i64) {
+        self.interval = intervalMs;
+        self.last = new DnsCache(false);
+        self.now = ReadingStatus::off(SOURCE, "not read yet");
+    }
+
+    /** Whether a sweep is due at `nowMs` (any steady clock, in milliseconds). */
+    pub fn due(self, nowMs : i64) : bool {
+        return nowMs >= self.nextAt;
+    }
+
+    /** Read the cache again. Answers whether the system gave a reading. */
+    pub fn sweep(mut self, nowMs : i64) : bool {
+        self.nextAt = nowMs + self.interval;
+        try {
+            let fresh : DnsCache = DnsSys::cache();
+            if (!fresh.answered()) {
+                self.now = ReadingStatus::lost(
+                    SOURCE,
+                    "empty or not answering; asked again at the next sweep"
+                );
+                return false;
+            }
+            self.last = fresh;
+            self.now = ReadingStatus::on(SOURCE, fresh.size().toString() + " cached answers read");
+            return true;
+        } catch e : Unsupported {
+            self.now = ReadingStatus::unavailable(SOURCE, e.message);
+        } catch e : Denied {
+            self.now = ReadingStatus::off(SOURCE, e.message);
+        } catch e : SysError {
+            self.now = ReadingStatus::lost(SOURCE, e.message);
+        }
+        return false;
+    }
+
+    /** What the reader is doing, and why. */
+    pub fn status(self) : ReadingStatus {
+        return self.now;
+    }
+
+    /** The last good reading (empty until one has been made). */
+    pub fn cache(self) : DnsCache {
+        return self.last;
+    }
+
+    /** The name the last good reading holds for `addr`, or an empty string. */
+    pub fn nameOf(self, addr : Addr) : string {
+        return self.last.nameOf(addr);
+    }
+}
