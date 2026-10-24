@@ -43,7 +43,10 @@ pub class ProcStat {
      */
     pub static fn bootSeconds(text : string) : i64 {
         let at : i64 = Scan::lineWith(text, "btime ");
-        return at < 0 ? -1 : Line::at(text, at).field(1).dec();
+        if (at < 0) {
+            return -1;
+        }
+        return Line::at(text, at).field(1).dec();
     }
 
     /** The process `line` describes, its times and sizes read with `clock`. */

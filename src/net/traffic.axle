@@ -79,13 +79,19 @@ pub class TrafficMeter {
     /** Bytes per second received by `name` between the last two readings; 0 for an unknown interface. */
     pub fn rxPerSecond(self, name : string) : i64 {
         let i : i32 = self.slot(name);
-        return i < 0 ? 0 : self.rows.at(i).rxRate;
+        if (i < 0) {
+            return 0;
+        }
+        return self.rows.at(i).rxRate;
     }
 
     /** Bytes per second sent by `name` between the last two readings. */
     pub fn txPerSecond(self, name : string) : i64 {
         let i : i32 = self.slot(name);
-        return i < 0 ? 0 : self.rows.at(i).txRate;
+        if (i < 0) {
+            return 0;
+        }
+        return self.rows.at(i).txRate;
     }
 
     /** Bytes per second received by every interface together. */

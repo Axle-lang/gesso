@@ -1,0 +1,62 @@
+// diag — the probe's readings, one primitive at a time, each announced before it runs.
+//
+// When the probe dies in the middle of a reading (a segmentation fault tells nothing about where), this
+// runs the same calls in the order they build on one another and prints a line *before* each, so the last
+// line on the screen is the call that was running. Nothing is changed on the machine.
+//
+// Build & run:  axle build, then target/diag
+
+use gesso::{Fs, EntryList, Procs, ProcInfo, ProcTree, SysError, Host, MemoryInfo, Net, SocketTable};
+
+/** Announce a stage. */
+fn stage(name : string) : void {
+    println("stage: " + name);
+}
+
+fn main() : i32 {
+    println("gesso diag — each line is printed before the call it names");
+    try {
+        stage("memory");
+        let mem : MemoryInfo = Host::memory();
+        println("  total " + mem.total.toString() + " available " + mem.available.toString());
+
+        stage("a small directory (Fs::list /sys/class/net)");
+        let small : EntryList = Fs::list("/sys/class/net");
+        println("  " + small.size().toString() + " entries");
+
+        stage("a large directory, more than 16 names (Fs::list /proc)");
+        let big : EntryList = Fs::list("/proc");
+        println("  " + big.size().toString() + " entries");
+
+        stage("the process list (Procs::list)");
+        let procs : ProcInfo[] = Procs::list();
+        println("  " + procs.length.toString() + " processes");
+        stage("the first process, printed");
+        println("  " + procs[0 as i64].describe());
+        stage("the last process, printed");
+        println("  " + procs[(procs.length - 1) as i64].describe());
+
+        stage("the tree (Procs::tree)");
+        let tree : ProcTree = Procs::tree();
+        println("  " + tree.size().toString() + " in the tree, " + tree.rootCount().toString() + " roots");
+        stage("one row of the tree");
+        println("  " + tree.infoAt(0).describe());
+
+        stage("a process by name (Procs::find)");
+        println("  " + Procs::find("systemd").length.toString() + " named systemd");
+
+        stage("this program's own path and priority");
+        let me : i64 = Host::info().pid;
+        println("  " + Procs::imagePath(me));
+        println("  " + Procs::priority(me).label());
+
+        stage("the sockets (Net::sockets)");
+        let sockets : SocketTable = Net::sockets();
+        println("  " + sockets.size().toString() + " sockets, " + sockets.unowned().toString() + " unowned");
+    } catch e : SysError {
+        println("  ! " + e.message);
+        return 1;
+    }
+    println("done");
+    return 0;
+}

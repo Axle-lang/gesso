@@ -148,3 +148,18 @@ jobs:
         continue-on-error: true
         working-directory: examples/probe
         run: ./target/probe
+
+      # A segmentation fault says nothing about where. The diagnostic runs the probe's calls one at a time and
+      # prints a line before each, so the last line in this step's log is the call that was running.
+      - name: Build the diagnostic
+        id: diag
+        if: always()
+        continue-on-error: true
+        working-directory: examples/diag
+        run: axle build
+
+      - name: Run the diagnostic
+        if: always() && steps.diag.outcome == 'success'
+        continue-on-error: true
+        working-directory: examples/diag
+        run: ./target/diag

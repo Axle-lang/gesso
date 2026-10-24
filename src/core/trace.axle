@@ -491,19 +491,28 @@ pub class TraceCounters {
     /** Bytes `pid` has sent since the trace began. */
     pub fn bytesSent(self, pid : i64) : i64 {
         let at : i32 = self.index.get(pid);
-        return at < 0 ? 0 : self.sent[at as i64];
+        if (at < 0) {
+            return 0;
+        }
+        return self.sent[at as i64];
     }
 
     /** Bytes `pid` has received since the trace began. */
     pub fn bytesReceived(self, pid : i64) : i64 {
         let at : i32 = self.index.get(pid);
-        return at < 0 ? 0 : self.received[at as i64];
+        if (at < 0) {
+            return 0;
+        }
+        return self.received[at as i64];
     }
 
     /** Connections `pid` has opened or accepted since the trace began. */
     pub fn connectionsOf(self, pid : i64) : i64 {
         let at : i32 = self.index.get(pid);
-        return at < 0 ? 0 : self.opened[at as i64];
+        if (at < 0) {
+            return 0;
+        }
+        return self.opened[at as i64];
     }
 
     /** Bytes all processes together have sent. */

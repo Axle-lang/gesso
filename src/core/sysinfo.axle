@@ -20,8 +20,16 @@ pub class MemText {
     /** The bytes the line starting with `key` holds, or -1. */
     static fn kib(text : string, key : string) : i64 {
         let at : i64 = Scan::lineWith(text, key);
-        let kb : i64 = at < 0 ? -1 : Line::at(text, at).field(1).dec();
-        return kb < 0 ? -1 : kb * 1024;
+        if (at < 0) {
+            return -1;
+        }
+        // Not a conditional expression: with a bare `-1` on one side the other side is read as 32 bits
+        // and a machine with more than 2 GiB of memory reports a negative total.
+        let kb : i64 = Line::at(text, at).field(1).dec();
+        if (kb < 0) {
+            return -1;
+        }
+        return kb * 1024;
     }
 }
 
