@@ -1,0 +1,58 @@
+// sys/desksys — the desktop, on Windows: showing a file in Explorer.
+//
+// `explorer.exe /select,"<path>"` opens the containing folder with the file already highlighted, which is
+// the answer to "where is this?" — as opposed to opening the folder and leaving the reader to find one
+// binary among two hundred. The path is quoted because program folders contain spaces, and Explorer's
+// argument parser takes the first space as the end of the path.
+//
+// The path travels as UTF-16 code units from start to end: it came out of Windows that way, and passing it
+// through a narrow string would lose exactly the characters that make a path unusual. Explorer opens a
+// default folder, and says nothing, for a path that does not exist; so existence is checked first and a
+// missing path is `Gone` rather than a window that shows the wrong folder.
+
+use crate::core::error::{SysError, Gone, OsFailure};
+use crate::sys::errno::Errno;
+use crate::sys::kernel32::{GetLastError, GetFileAttributesExW, FAD_SIZE};
+use crate::sys::shell32::{ShellExecuteW, SW_SHOWNORMAL, SHELL_OK_FLOOR};
+use crate::raw::mem::Raw;
+use crate::raw::buf::Buf;
+use crate::raw::wide::Wide;
+
+/** ASCII `"`, and the length of `/select,"` and the closing quote around the path in the arguments. */
+const QUOTE : i32 = 34;
+const SELECT : string = "/select,";
+
+/** The desktop. */
+pub class DeskSys {
+    /** Show the file or folder at `path` (UTF-16 code units) in the file manager, selected. */
+    pub static fn reveal(path : i32[]) : void ! SysError {
+        let probe : Buf = Wide::fromUnits(path, 0);
+        let data : Buf = new Buf(FAD_SIZE);
+        if (GetFileAttributesExW(probe.ptr(), 0, data.ptr()) == 0) {
+            Errno::win32("desk.reveal", "the path", GetLastError());
+        }
+        let lead : i32 = SELECT.byteLength as i32;
+        let n : i32 = path.length as i32;
+        let args : Buf = new Buf(((lead + n + 3) * 2) as i64);
+        for (i of 0..lead) {
+            args.putU16((i * 2) as i64, SELECT.byteAt(i as i64));
+        }
+        args.putU16((lead * 2) as i64, QUOTE);
+        for (i of 0..n) {
+            args.putU16(((lead + 1 + i) * 2) as i64, path[i as i64]);
+        }
+        args.putU16(((lead + 1 + n) * 2) as i64, QUOTE);
+        let verb : Buf = Wide::alloc("open");
+        let file : Buf = Wide::alloc("explorer.exe");
+        let r : ptr = ShellExecuteW(
+            Raw::nil(), verb.ptr(), file.ptr(), args.ptr(), Raw::nil(), SW_SHOWNORMAL
+        );
+        let code : i64 = Raw::addr(r);
+        if (code <= SHELL_OK_FLOOR) {
+            if (code > 0) {
+                Errno::win32("desk.reveal", "the path", code as i32);
+            }
+            throw OsFailure("desk.reveal", 0, "ShellExecuteW");
+        }
+    }
+}

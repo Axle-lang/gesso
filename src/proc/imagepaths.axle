@@ -1,0 +1,189 @@
+// imagepaths — where the programs are, for many processes at once, and remembered.
+//
+//     let cache : ImagePathCache = new ImagePathCache();
+//     cache.resolveAll(Procs::list());             // one open per process the first time, none after
+//     cache.pathOf(info)                           // "C:\Program Files\App\app.exe", or "" if unreadable
+//     cache.why(info)                              // "denied on process 4: needs an elevated administrator"
+//
+// Finding a process's program takes opening it, which the system refuses for some processes and which
+// costs a call for every one. A program that shows the path of every row would ask again on every
+// repaint. The cache remembers by `ProcInfo::key`, which folds in the start time, so an id the system
+// reuses for another process is a miss and not the old answer; a path it could not read is remembered
+// too, with the reason, since a process that was refused a moment ago is refused now.
+//
+// `ImagePaths` is the stateless form: the paths of some ids, each with its own success or failure, in one
+// call.
+
+use crate::core::error::SysError;
+use crate::core::index::PidIndex;
+use crate::core::list::Values;
+use crate::core::process::ProcInfo;
+use crate::sys::procsys::ProcSys;
+
+/** The result of looking up many programs: for each id, a path or the reason there is none. */
+pub class ImagePaths {
+    pids  : Values<i64>;
+    paths : Values<string>;
+    why   : Values<string>;
+
+    /** An empty result. */
+    constructor() {
+        self.pids = new Values<i64>();
+        self.paths = new Values<string>();
+        self.why = new Values<string>();
+    }
+
+    /** Record that process `pid` runs the program at `path`. */
+    pub fn found(mut self, pid : i64, path : string) : void {
+        self.pids.add(pid);
+        self.paths.add(path);
+        self.why.add("");
+    }
+
+    /** Record that the program of `pid` could not be found, and why. */
+    pub fn failed(mut self, pid : i64, message : string) : void {
+        self.pids.add(pid);
+        self.paths.add("");
+        self.why.add(message);
+    }
+
+    /** How many ids were asked about. */
+    pub fn size(self) : i32 {
+        return self.pids.size();
+    }
+
+    /** The id at position `i`. */
+    pub fn pidAt(self, i : i32) : i64 {
+        return self.pids.at(i);
+    }
+
+    /** The path at position `i`; empty when it could not be read. */
+    pub fn pathAt(self, i : i32) : string {
+        return self.paths.at(i);
+    }
+
+    /** Why the path at position `i` could not be read; empty when it was. */
+    pub fn whyAt(self, i : i32) : string {
+        return self.why.at(i);
+    }
+
+    /** The position of `pid`, or -1. */
+    pub fn indexOf(self, pid : i64) : i32 {
+        for (i of 0..self.pids.size()) {
+            if (self.pids.at(i) == pid) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** The path of `pid`, or an empty string. */
+    pub fn pathOf(self, pid : i64) : string {
+        let i : i32 = self.indexOf(pid);
+        return i < 0 ? "" : self.paths.at(i);
+    }
+
+    /** How many were found. */
+    pub fn resolved(self) : i32 {
+        let mut n : i32 = 0;
+        for (i of 0..self.paths.size()) {
+            if (self.why.at(i).byteLength == 0) {
+                n = n + 1;
+            }
+        }
+        return n;
+    }
+}
+
+/** Program paths, remembered by process. */
+pub class ImagePathCache {
+    index   : PidIndex;
+    keys    : Values<i64>;
+    paths   : Values<string>;
+    reasons : Values<string>;
+    room    : i32;
+
+    /** An empty cache. */
+    constructor() {
+        self.room = 256;
+        self.index = new PidIndex(self.room);
+        self.keys = new Values<i64>();
+        self.paths = new Values<string>();
+        self.reasons = new Values<string>();
+    }
+
+    /** How many processes are remembered. */
+    pub fn size(self) : i32 {
+        return self.keys.size();
+    }
+
+    /** The place of `info` in the cache, or -1. */
+    pub(file) fn slot(self, info : ProcInfo) : i32 {
+        return self.index.get(info.key);
+    }
+
+    /** Whether the program of `info` has been looked for already (found or not). */
+    pub fn knows(self, info : ProcInfo) : bool {
+        return self.slot(info) >= 0;
+    }
+
+    /** Make the index larger and put every key back in it. */
+    pub(file) fn grow(mut self) : void {
+        self.room = self.room * 2;
+        self.index = new PidIndex(self.room);
+        for (i of 0..self.keys.size()) {
+            self.index.put(self.keys.at(i), i);
+        }
+    }
+
+    /** Remember `path` and `why` for `info`. */
+    pub(file) fn remember(mut self, info : ProcInfo, path : string, why : string) : void {
+        if (self.keys.size() >= self.room) {
+            self.grow();
+        }
+        self.index.put(info.key, self.keys.size());
+        self.keys.add(info.key);
+        self.paths.add(path);
+        self.reasons.add(why);
+    }
+
+    /** Look the program of `info` up if it has not been, and remember what came of it. */
+    pub fn resolve(mut self, info : ProcInfo) : void {
+        if (self.knows(info)) {
+            return;
+        }
+        try {
+            self.remember(info, ProcSys::imagePath(info.pid), "");
+        } catch e : SysError {
+            self.remember(info, "", e.message);
+        }
+    }
+
+    /** `resolve` for each of `infos`. */
+    pub fn resolveAll(mut self, infos : ProcInfo[]) : void {
+        for (i of 0..infos.length) {
+            self.resolve(infos[i]);
+        }
+    }
+
+    /** The path of `info`'s program, resolving it first if needed; empty when it cannot be read. */
+    pub fn pathOf(mut self, info : ProcInfo) : string {
+        self.resolve(info);
+        return self.paths.at(self.slot(info));
+    }
+
+    /** Why `info`'s program could not be found; empty when it was found. */
+    pub fn why(mut self, info : ProcInfo) : string {
+        self.resolve(info);
+        return self.reasons.at(self.slot(info));
+    }
+
+    /** Forget everything, so that the next question asks the system again (after elevating, say). */
+    pub fn clear(mut self) : void {
+        self.room = 256;
+        self.index = new PidIndex(self.room);
+        self.keys = new Values<i64>();
+        self.paths = new Values<string>();
+        self.reasons = new Values<string>();
+    }
+}

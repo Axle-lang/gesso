@@ -25,12 +25,14 @@ use crate::core::{
 
 use crate::raw::{buf, mem, sockaddr, wide};
 
-use crate::sys::{dnssys, errno, fssys, netsys, os, procsys, syssys};
+use crate::sys::{desksys, dnssys, errno, fssys, netsys, os, procsys, syssys};
 
 use crate::system::{cpu, host};
 
-use crate::proc::{procs, tree};
+use crate::proc::{imagepaths, procs, tree};
 
 use crate::net::{dnsreader, net, traffic};
 
 use crate::fs::{fs};
+
+use crate::desk::{desk};

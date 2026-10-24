@@ -25,6 +25,7 @@ use crate::core::text::Utf8;
 use crate::sys::procsys::ProcSys;
 use crate::sys::os::Os;
 use crate::proc::tree::ProcTree;
+use crate::proc::imagepaths::ImagePaths;
 
 /** The machine's processes. */
 pub class Procs {
@@ -67,6 +68,31 @@ pub class Procs {
     /** The path of the program `pid` runs. Another user's process may refuse this with `Denied`. */
     pub static fn imagePath(pid : i64) : string ! SysError {
         return ProcSys::imagePath(pid);
+    }
+
+    /**
+     * The path of the program `pid` runs as the UTF-16 code units the system holds it in. On Windows this is
+     * exact even for a path with an unpaired surrogate, which cannot be written as UTF-8; a path that goes
+     * back to the system (to reveal it, to open it) should travel in this form.
+     */
+    pub static fn imagePathUnits(pid : i64) : i32[] ! SysError {
+        return ProcSys::imagePathUnits(pid);
+    }
+
+    /**
+     * The programs of many processes in one call: each id has its path, or the reason it has none, and one
+     * refused process does not stop the others. For a list shown again and again, keep an `ImagePathCache`.
+     */
+    pub static fn imagePaths(pids : i64[]) : ImagePaths {
+        let out : ImagePaths = new ImagePaths();
+        for (i of 0..pids.length) {
+            try {
+                out.found(pids[i as i64], ProcSys::imagePath(pids[i as i64]));
+            } catch e : SysError {
+                out.failed(pids[i as i64], e.message);
+            }
+        }
+        return out;
     }
 
     /** How urgently the system schedules `pid`. */

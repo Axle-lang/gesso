@@ -19,6 +19,7 @@ use crate::sys::libc::{
     readlink, getpriority, setpriority, sched_getscheduler, kill, PRIO_PROCESS, SCHED_FIFO, SCHED_RR,
 };
 use crate::sys::files::Files;
+use crate::core::text::Utf16;
 use crate::raw::buf::Buf;
 use crate::raw::wide::Narrow;
 
@@ -54,6 +55,11 @@ pub class ProcSys {
             Errno::posix("proc.imagePath", ProcInfo::label(pid), Files::errno());
         }
         return Narrow::read(target.ptr(), n);
+    }
+
+    /** The path of the program `pid` runs, as UTF-16 code units (Linux keeps it as UTF-8 bytes). */
+    pub static fn imagePathUnits(pid : i64) : i32[] ! SysError {
+        return Utf16::units(ProcSys::imagePath(pid));
     }
 
     /** How urgently the system schedules `pid`. */

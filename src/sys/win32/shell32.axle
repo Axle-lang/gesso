@@ -1,0 +1,15 @@
+// sys/shell32 — the shell32 imports the Windows port uses: asking the shell to open something.
+
+extern "C" from "shell32" {
+    /**
+     * `HINSTANCE ShellExecuteW(HWND, LPCWSTR verb, LPCWSTR file, LPCWSTR params, LPCWSTR dir, INT show)`. The
+     * result is a legacy `HINSTANCE`: above 32 it worked, and at or below it is an error code.
+     */
+    fn ShellExecuteW(window : ptr, verb : ptr, file : ptr, params : ptr, dir : ptr, show : i32) : ptr;
+}
+
+/** `SW_SHOWNORMAL`. */
+const SW_SHOWNORMAL : i32 = 1;
+
+/** The result of `ShellExecuteW` at or below which it is an error code and not a handle. */
+const SHELL_OK_FLOOR : i64 = 32;

@@ -1,0 +1,11 @@
+// fakes/desksys — the `sys::desksys` seam as the tests see it: a desktop that shows nothing.
+//
+// The same public shape as the two ports. A test that wants to know what was asked replaces the function.
+
+use crate::core::error::SysError;
+
+/** A desktop that is always the same. */
+pub class DeskSys {
+    pub static fn reveal(path : i32[]) : void ! SysError {
+    }
+}

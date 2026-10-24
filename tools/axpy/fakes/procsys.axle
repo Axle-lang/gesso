@@ -5,7 +5,9 @@
 // test that needs a refusal replaces the seam's function for the length of the test.
 
 use crate::core::process::{ProcInfo, Priority, Signal};
-use crate::core::error::{SysError, Gone};
+use crate::core::error::{SysError, Gone, Denied};
+use crate::core::privilege::Privilege;
+use crate::core::text::Utf16;
 
 /** A machine that is always the same. */
 pub class ProcSys {
@@ -19,10 +21,26 @@ pub class ProcSys {
         return out;
     }
     pub static fn imagePath(pid : i64) : string ! SysError {
+        if (pid == 1) {
+            return "/sbin/init";
+        }
+        if (pid == 20) {
+            return "/usr/bin/shell";
+        }
         if (pid == 21) {
             return "/usr/bin/editor";
         }
+        if (pid == 22) {
+            return "/usr/bin/éditor";
+        }
+        if (pid == 30) {
+            throw Denied("proc.imagePath", "process 30", Privilege::Elevated, 5);
+        }
         throw Gone("proc.imagePath", "process " + pid.toString());
+    }
+
+    pub static fn imagePathUnits(pid : i64) : i32[] ! SysError {
+        return Utf16::units(ProcSys::imagePath(pid));
     }
     pub static fn priority(pid : i64) : Priority ! SysError {
         if (pid == 21) {

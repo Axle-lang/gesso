@@ -24,6 +24,19 @@ pub class Wide {
     }
 
     /**
+     * A NUL-terminated copy of the UTF-16 code units `units`, with room for `extra` more units before the
+     * NUL.
+     */
+    pub static fn fromUnits(units : i32[], extra : i32) : Buf {
+        let n : i32 = units.length as i32;
+        let buf : Buf = new Buf(((n + extra + 1) * 2) as i64);
+        for (i of 0..n) {
+            buf.putU16((i * 2) as i64, units[i as i64]);
+        }
+        return buf;
+    }
+
+    /**
      * The text of the UTF-16 string at `base`, up to its NUL or `maxUnits` code units, whichever comes first.
      */
     pub static fn read(base : ptr, maxUnits : i32) : string {

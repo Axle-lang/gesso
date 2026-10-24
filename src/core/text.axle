@@ -148,6 +148,20 @@ pub class Utf16 {
         return units;
     }
 
+    /**
+     * `s` as exactly `length(s)` code units, with no terminator (an array whose `length` is the number of
+     * units).
+     */
+    pub static fn units(s : string) : i32[] {
+        let coded : i32[] = Utf16::encode(s);
+        let n : i32 = Utf16::length(s);
+        let mut out : i32[] = malloc<i32>(n as i64);
+        for (i of 0..n) {
+            out[i as i64] = coded[i as i64];
+        }
+        return out;
+    }
+
     /** The text in the first `n` code units of `units`; a lone surrogate becomes U+FFFD. */
     pub static fn decode(units : i32[], n : i32) : string {
         let sb : StringBuilder = new StringBuilder();
