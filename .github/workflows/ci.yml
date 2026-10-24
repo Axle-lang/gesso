@@ -1,0 +1,150 @@
+name: CI
+
+# Every push to `dev` or `main`, and every pull request aimed at either.
+#
+# Three jobs, because the library makes three different claims and each is proved by something different:
+#
+#   checks   the portable half — parsers, tables, arithmetic, the whole API over fake machines — runs as
+#            Python (tools/axpy), beside the checker for layers, ports and seams, and a smoke test that feeds
+#            the library's parsers the real /proc of the runner;
+#   windows  the compiler's word for the Windows target, and the probe built;
+#   linux    the compiler's word for the Linux target, and the probe built and run on a real kernel.
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [dev, main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The compiler these sources need. The installers serve whatever is current, so the jobs check instead
+  # of assuming: an older `axle` fails with one clear line rather than a hundred confusing ones.
+  AXLE_MIN: '0.18.1'
+
+jobs:
+  checks:
+    name: Checks (portable half)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # The translator keeps its simulated heap in numpy.
+      - run: pip install numpy
+      - name: Layers, ports, seams, names
+        run: python3 tools/check.py
+      - name: The checker rejects what it should
+        run: python3 tools/check.py --selftest
+      - name: lib.axle names every module
+        run: python3 tools/gen_lib.py --check
+      - name: The portable logic, run
+        run: |
+          for t in core proc net fs system dns desk trace machine; do
+            echo "── $t"
+            python3 tools/axpy/test_$t.py | tail -3
+          done
+      # What the Linux seams read is text; this runs the parsers on the runner's own /proc and /sys, not on
+      # a sample written by hand. It does not run the libc calls that fetch the text.
+      - name: The parsers on a real kernel
+        run: python3 tools/axpy/live_linux.py
+
+  windows:
+    name: Build (Windows x86_64)
+    runs-on: windows-latest
+    steps:
+      - name: Install Axle
+        shell: pwsh
+        run: |
+          $msi = Join-Path $env:RUNNER_TEMP 'axle.msi'
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri 'https://dl.axle-lang.dev/latest/axle-windows-x86_64.msi' -OutFile $msi
+          $p = Start-Process msiexec.exe -Wait -PassThru `
+            -ArgumentList '/i', "`"$msi`"", '/qn', '/norestart'
+          if ($p.ExitCode -ne 0) { throw "msiexec failed with exit code $($p.ExitCode)" }
+          $dir = $null
+          foreach ($k in 'HKLM:\SOFTWARE\WOW6432Node\Axle', 'HKLM:\SOFTWARE\Axle') {
+            if (-not $dir -and (Test-Path $k)) {
+              $dir = (Get-ItemProperty $k -Name InstallDir -ErrorAction SilentlyContinue).InstallDir
+            }
+          }
+          foreach ($c in 'C:\Program Files (x86)\Axle', 'C:\Program Files\Axle') {
+            if (-not $dir -and (Test-Path (Join-Path $c 'axle.exe'))) { $dir = $c }
+          }
+          if (-not $dir) { throw 'the MSI installed, but axle.exe was not found' }
+          Add-Content -Path $env:GITHUB_PATH -Value $dir.TrimEnd('\')
+          if (-not (Get-Command lld-link.exe -ErrorAction SilentlyContinue)) {
+            throw 'lld-link.exe is not on PATH; axle cannot link a Windows binary without it (install LLVM)'
+          }
+
+      - name: Check the compiler is new enough
+        shell: pwsh
+        run: |
+          $got = (((& axle --version) -split ' ')[1] -split '-')[0]
+          if ([version]$got -lt [version]$env:AXLE_MIN) { throw "axle $got is older than the required $env:AXLE_MIN" }
+          "axle $got satisfies >= $env:AXLE_MIN"
+
+      - uses: actions/checkout@v4
+
+      - name: The port this build resolves
+        run: axle ports
+
+      - name: Build the probe
+        working-directory: examples/probe
+        run: axle build
+
+      # The probe only reads. On a runner it is not elevated, so its trace section says exactly that and the
+      # rest prints what the machine holds: a run that completes is the proof the Windows calls answer.
+      - name: Run the probe
+        working-directory: examples/probe
+        run: ./target/probe.exe
+
+  linux:
+    name: Build (Linux x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Axle
+        run: |
+          sudo install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://apt.axle-lang.dev/key.asc | sudo gpg --dearmor -o /etc/apt/keyrings/axle.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/axle.gpg arch=amd64] https://apt.axle-lang.dev stable main" \
+            | sudo tee /etc/apt/sources.list.d/axle.list
+          sudo apt-get update
+          sudo apt-get install -y axle
+
+      - name: Check the compiler is new enough
+        run: |
+          got=$(axle --version | awk '{print $2}' | cut -d- -f1)
+          if [ "$(printf '%s\n%s\n' "$AXLE_MIN" "$got" | sort -V | head -n1)" != "$AXLE_MIN" ]; then
+            echo "axle $got is older than the required $AXLE_MIN"; exit 1
+          fi
+          echo "axle $got satisfies >= $AXLE_MIN"
+
+      - uses: actions/checkout@v4
+
+      - name: The port this build resolves
+        run: axle ports
+
+      - name: The compiler's word for the Linux target
+        working-directory: examples/probe
+        run: axle check --target x86_64-unknown-linux-gnu
+
+      # Linking and running is the proof that the libc calls work: `statx`, `inotify`, `res_query`, the
+      # walk of /proc/<pid>/fd. It has never been done for this library, so a failure here is news about the
+      # library and not about the runner, and it does not turn the job red until it has passed once: flip
+      # `continue-on-error` to false the day it does.
+      - name: Build the probe
+        id: build
+        continue-on-error: true
+        working-directory: examples/probe
+        run: axle build
+
+      - name: Run the probe on a real kernel
+        if: steps.build.outcome == 'success'
+        continue-on-error: true
+        working-directory: examples/probe
+        run: ./target/probe

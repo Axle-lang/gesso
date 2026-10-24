@@ -126,16 +126,26 @@ pub class SocketInfo : Copy<SocketInfo> {
      */
     pub pid    : i64;
 
+    /**
+     * The id of the *user* that owns it, or -1 when the system does not say. Linux names the user of every
+     * socket in `/proc/net/tcp` even when the process is out of sight, so a socket whose `pid` is -1 still
+     * says whose it is; Windows says the process only.
+     */
+    pub uid    : i64;
+
     /** The same for the same flow across readings, whoever owns it and whatever its state. */
     pub key    : i64;
 
-    /** A socket read as `proto` between `local` and `remote`, `state`, owned by `pid`. */
+    /**
+     * A socket read as `proto` between `local` and `remote`, `state`, owned by process `pid` of user `uid`.
+     */
     constructor(
         proto : Proto,
         own local : Endpoint,
         own remote : Endpoint,
         state : TcpState,
-        pid : i64
+        pid : i64,
+        uid : i64
     ) {
         self.key = Key::step(
             Key::step(Key::step(Key::seed(), proto as i64), local.key()),
@@ -146,6 +156,7 @@ pub class SocketInfo : Copy<SocketInfo> {
         self.remote = remote;
         self.state = state;
         self.pid = pid;
+        self.uid = uid;
     }
 
     /** Whether it waits for connections. */
@@ -153,9 +164,25 @@ pub class SocketInfo : Copy<SocketInfo> {
         return self.proto == Proto::Tcp && self.state == TcpState::Listen;
     }
 
-    /** Whether the owner is known. */
+    /** Whether the owning process is known. */
     pub fn hasOwner(self) : bool {
         return self.pid >= 0;
+    }
+
+    /** Whether the owning user is known. */
+    pub fn hasUser(self) : bool {
+        return self.uid >= 0;
+    }
+
+    /**
+     * Who owns it, as well as it is known: "pid 4120", "user 1000" (the process is out of sight), or
+     * "unknown".
+     */
+    pub fn ownerLabel(self) : string {
+        if (self.pid >= 0) {
+            return "pid " + self.pid.toString();
+        }
+        return self.uid >= 0 ? "user " + self.uid.toString() : "unknown";
     }
 
     /** Whether the peer is outside this machine and its own network. */
@@ -172,6 +199,8 @@ pub class SocketInfo : Copy<SocketInfo> {
         s = s + " " + self.state.label();
         if (self.pid >= 0) {
             s = s + " (pid " + self.pid.toString() + ")";
+        } else if (self.uid >= 0) {
+            s = s + " (user " + self.uid.toString() + ")";
         }
         return s;
     }
@@ -183,7 +212,8 @@ pub class SocketInfo : Copy<SocketInfo> {
             self.local.copy(),
             self.remote.copy(),
             self.state,
-            self.pid
+            self.pid,
+            self.uid
         );
     }
 }
@@ -215,7 +245,7 @@ pub class SocketTable {
     /** Say that process `pid` owns the socket at position `i`. */
     pub fn setOwner(mut self, i : i32, pid : i64) : void {
         let r : SocketInfo = self.rows.at(i);
-        self.rows.set(i, new SocketInfo(r.proto, r.local.copy(), r.remote.copy(), r.state, pid));
+        self.rows.set(i, new SocketInfo(r.proto, r.local.copy(), r.remote.copy(), r.state, pid, r.uid));
     }
 
     /** A new table of the rows `keep` accepts. */
@@ -270,6 +300,16 @@ pub class SocketTable {
     /** The sockets whose peer is outside this machine and its network. */
     pub fn external(self) : SocketTable {
         return self.where((s: SocketInfo) => s.isExternal());
+    }
+
+    /** The sockets whose process is out of sight (`pid` -1): the ones a display must show and not drop. */
+    pub fn withoutOwner(self) : SocketTable {
+        return self.where((s: SocketInfo) => !s.hasOwner());
+    }
+
+    /** The sockets a user owns. */
+    pub fn ofUser(self, uid : i64) : SocketTable {
+        return self.where((s: SocketInfo) => s.uid == uid);
     }
 
     /** How many have no known owner. */

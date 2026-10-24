@@ -1,0 +1,47 @@
+// sys/filemanager — asking the desktop's file manager to show something, for the Linux desk seam.
+//
+// Two ways, tried in this order. The first is the D-Bus call `org.freedesktop.FileManager1.ShowItems`,
+// which Nautilus, Dolphin, Thunar and others answer by opening the folder *with the file selected*; it is
+// made with `dbus-send`, the command-line client every desktop with a session bus has. The second is
+// `xdg-open` on the folder, which every desktop has and which shows the file among its neighbours.
+
+use std::sys::process::{ProcessBuilder, Process};
+use crate::core::uri::FileUri;
+
+/** The file manager. */
+pub class FileManager {
+    /** Run `program` with `args` and answer its exit code; -1 when it could not be started. */
+    pub static fn run(program : string, args : string[]) : i32 {
+        try {
+            let pb : ProcessBuilder = new ProcessBuilder(program);
+            for (i of 0..args.length) {
+                pb.addArg(args[i]);
+            }
+            let p : Process = pb.start();
+            defer p.close();
+            return p.waitFor();
+        } catch e : IOException {
+            return -1;
+        }
+    }
+
+    /** Ask the file manager to show `path` selected; whether it answered. */
+    pub static fn select(path : string) : bool {
+        let args : string[] = [
+            "--session",
+            "--reply-timeout=2000",
+            "--dest=org.freedesktop.FileManager1",
+            "--type=method_call",
+            "/org/freedesktop/FileManager1",
+            "org.freedesktop.FileManager1.ShowItems",
+            "array:string:" + FileUri::encode(path),
+            "string:",
+        ];
+        return FileManager::run("dbus-send", args) == 0;
+    }
+
+    /** Open the folder `folder`: the exit code of `xdg-open`, or -1 when there is no such command. */
+    pub static fn open(folder : string) : i32 {
+        return FileManager::run("xdg-open", [folder]);
+    }
+}

@@ -1,0 +1,34 @@
+// uri — a file path written as the `file://` address the desktop's own interfaces take.
+//
+// The file managers of Linux desktops are asked to show a file over D-Bus, and the call takes URIs, not
+// paths. A path becomes one by percent-encoding every byte of its UTF-8 that is not safe in a URI; the
+// separators stay as they are. Nothing else is read or checked here.
+
+use std::text::StringBuilder;
+
+/** File URIs. */
+pub class FileUri {
+    /** Whether byte `b` stands for itself in a URI path: letters, digits, `-`, `.`, `_`, `~` and `/`. */
+    pub(file) static fn plain(b : i32) : bool {
+        return (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122)
+            || b == 45 || b == 46 || b == 95 || b == 126 || b == 47;
+    }
+
+    /** The address of the absolute path `path`: "/home/zoé/a b.txt" is "file:///home/zo%C3%A9/a%20b.txt". */
+    pub static fn encode(path : string) : string {
+        let digits : string = "0123456789ABCDEF";
+        let sb : StringBuilder = new StringBuilder();
+        sb.append("file://");
+        for (i of 0..path.byteLength) {
+            let b : i32 = path.byteAt(i);
+            if (FileUri::plain(b)) {
+                sb.appendChar(b);
+            } else {
+                sb.appendChar(37);
+                sb.appendChar(digits.byteAt((b >> 4) as i64));
+                sb.appendChar(digits.byteAt((b & 15) as i64));
+            }
+        }
+        return sb.toString();
+    }
+}

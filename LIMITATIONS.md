@@ -41,6 +41,7 @@ What stands in for the compiler on the rest is in `tools/`, and each claim below
 | Processor load (between readings, counters that go back, unreadable lines), the `/proc/stat` line, battery words and `PowerInfo` | `tools/axpy/test_system.py` | `core/sysinfo`, `system/cpu` |
 | Files as data: path joining, the kind a mode says, mode text, mount-table parsing and volume kinds, which volume holds a path, space, entry lists, the change queue, and `Fs` (stat, list, tree size, links, watcher) over a fixed fake disk | `tools/axpy/test_fs.py` | `core/fsinfo`, `core/fsparse`, `core/fswatch`, `fs` |
 | DNS and the trace as data: the reverse-zone names, a DNS message read as bytes (PTR, TXT, compressed names, a name that points at itself, a refused or cut answer), Team Cymru's names and answers, the resolver's cache inverted, the reader's status over time, the payloads of Kernel-Network and DNS-Client events, the running counts, the join of a socket to its process, program and name, the program paths and their cache, and the desktop's argument checks | `tools/axpy/test_dns.py`, `test_trace.py`, `test_desk.py`, `test_machine.py` | `core/dnswire`, `core/asinfo`, `core/dnsinfo`, `core/reading`, `core/trace`, `net/dnsreader`, `net/nettrace`, `proc/imagepaths`, `desk`, `machine` |
+| The Linux parsers on a real kernel: every row of the runner's own `/proc/net/{tcp,udp,route,dev}`, `/proc/mounts`, `/proc/stat`, `/proc/meminfo` and every `/proc/<pid>/stat` is read and checked for sanity (a name, a start time, a parent; the uptime agrees with the boot time; the interfaces are the ones `/sys/class/net` lists) | `tools/axpy/live_linux.py`, run by CI on every push | the parsers; **not** the libc calls that fetch the text |
 | Processes as data: the id index, the tree (orphans, reused ids, loops of parents), the parsing of `/proc/<pid>/stat` and `btime`, the priority and signal numbers, and `Procs` over a fixed fake machine | `tools/axpy/test_proc.py` | `core/process`, `core/procstat`, `core/index`, `proc` |
 | The checker rejects what it should | `tools/check.py --selftest` plants each fault | 25 faults |
 
@@ -94,7 +95,7 @@ What stands in for the compiler on the rest is in `tools/`, and each claim below
 - **Linux process changes.** `Priority::Realtime` cannot be *set* on Linux (it is a scheduling policy,
   `SCHED_FIFO`, not a nice value) and is raised as `Unsupported`; it can be *read*. Process affinity and
   per-thread listing are not in this slice.
-- **Network, reading only.** IPv6 routes are not listed on Windows (`GetIpForwardTable2` hands back a table that must be freed with a call this slice does not make). The owner of a Linux socket is visible for the caller's own processes, and for all of them from an elevated session; the rest read `pid` -1 and are counted by `SocketTable::unowned()`. A Linux route has no interface number (`ifIndex` 0), only a name. DNS cache, statistics and ping are not in this slice.
+- **Network, reading only.** IPv6 routes are not listed on Windows (`GetIpForwardTable2` hands back a table that must be freed with a call this slice does not make). The owner of a Linux socket is visible for the caller's own processes, and for all of them from an elevated session; the rest read `pid` -1 but keep the `uid` of their user, which `/proc/net/tcp` gives for every socket, and stay in the table: `withoutOwner()` takes them, `unowned()` counts them, and `Net::socketsStatus` reports the table as *partial* with the reason. A display must show them, with their user, and not drop them for want of a process. A Linux route has no interface number (`ifIndex` 0), only a name. DNS cache, statistics and ping are not in this slice.
 - **Files.** The watcher sees the entries of one folder, not those below it. The standard library's own file calls are not wrapped: use `Path` for reading, writing, renaming and deleting. There is no ACL or ownership reading yet, and Windows has no permission bits (`setMode` raises `Unsupported`; `setReadOnly` works on both). A Linux volume's label is not read (empty), nor whether it is removable.
 - **DNS and the trace.** The resolver's cache is not readable on Linux (`Unsupported`, naming why): a plain
   glibc system keeps none, and `systemd-resolved` keeps one behind D-Bus. A reverse or TXT lookup goes to the
@@ -102,8 +103,9 @@ What stands in for the compiler on the rest is in `tools/`, and each claim below
   counts need eBPF), needs an elevated session, and keeps up to 1,000 bytes of each event, so a DNS answer
   longer than that is read as no event. Of an event's two ends the library trusts the provider's naming
   (above); of UDP it knows only what the provider reports.
-- **Revealing a file.** Windows selects the file in Explorer; Linux opens the folder (there is no portable
-  way to select), through `xdg-open`, and says `Unsupported` where it is absent. A path with a quote in it,
+- **Revealing a file.** Windows selects the file in Explorer. Linux asks the file manager to select it over D-Bus
+  (`org.freedesktop.FileManager1.ShowItems`, through `dbus-send`), and where nothing answers opens the folder
+  with `xdg-open`; it says `Unsupported` only where neither exists. A path with a quote in it,
   or longer than 1,000 UTF-16 units, is refused rather than passed on cut.
 - **No async.** Watchers block for up to a time they are given (`Watch::wait`); a program that wants
   them off its main thread runs them on its own.

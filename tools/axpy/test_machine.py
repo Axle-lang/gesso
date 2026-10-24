@@ -30,11 +30,11 @@ A = g.Addr.parse
 def sockets():
     t = g.SocketTable()
     ep = g.Endpoint
-    t.add(g.SocketInfo(g.Proto.Tcp, ep(A("0.0.0.0"), 443), ep.none(), g.TcpState.Listen, 21))
-    t.add(g.SocketInfo(g.Proto.Tcp, ep(A("192.168.1.20"), 51000), ep(A("93.184.216.34"), 443), g.TcpState.Established, 21))
-    t.add(g.SocketInfo(g.Proto.Tcp, ep(A("192.168.1.20"), 51001), ep(A("52.1.2.3"), 443), g.TcpState.Established, 22))
-    t.add(g.SocketInfo(g.Proto.Tcp, ep(A("192.168.1.20"), 51002), ep(A("8.8.8.8"), 53), g.TcpState.Established, 9999))
-    t.add(g.SocketInfo(g.Proto.Udp, ep(A("0.0.0.0"), 5353), ep.none(), g.TcpState.Open, -1))
+    t.add(g.SocketInfo(g.Proto.Tcp, ep(A("0.0.0.0"), 443), ep.none(), g.TcpState.Listen, 21, 1000))
+    t.add(g.SocketInfo(g.Proto.Tcp, ep(A("192.168.1.20"), 51000), ep(A("93.184.216.34"), 443), g.TcpState.Established, 21, 1000))
+    t.add(g.SocketInfo(g.Proto.Tcp, ep(A("192.168.1.20"), 51001), ep(A("52.1.2.3"), 443), g.TcpState.Established, 22, 1000))
+    t.add(g.SocketInfo(g.Proto.Tcp, ep(A("192.168.1.20"), 51002), ep(A("8.8.8.8"), 53), g.TcpState.Established, 9999, 1000))
+    t.add(g.SocketInfo(g.Proto.Udp, ep(A("0.0.0.0"), 5353), ep.none(), g.TcpState.Open, -1, 1000))
     return t
 
 
@@ -45,7 +45,7 @@ m.refresh()
 check("refresh reads processes and sockets", m.hasRead() and m.processes().size() == 5 and m.sockets().size() == 5)
 check("a socket's process", m.processOf(m.sockets().at(1)).name == "editor" and m.process(22).name == "Editor")
 check("an owner that is not in the reading is Absent", isinstance(thrown(lambda: m.processOf(m.sockets().at(3))), g.Absent) and isinstance(thrown(lambda: m.processOf(m.sockets().at(4))), g.Absent) and isinstance(thrown(lambda: m.process(12345)), g.Absent))
-check("the owner's name, or why there is none", m.ownerName(m.sockets().at(1)) == "editor" and m.ownerName(m.sockets().at(3)) == "(exited)" and m.ownerName(m.sockets().at(4)) == "(owner not visible)")
+check("the owner's name, or why there is none", m.ownerName(m.sockets().at(1)) == "editor" and m.ownerName(m.sockets().at(3)) == "(exited)" and m.ownerName(m.sockets().at(4)) == "(owner not visible) of user 1000")
 check("a process's sockets", m.socketsOf(m.process(21)).size() == 2 and m.socketsOf(m.process(30)).size() == 0)
 
 # the programs: found once, and the unreadable ones with their reason
@@ -65,8 +65,11 @@ check("what is remembered survives a refresh", m.programOf(m.process(21)) == "/u
 check("the cache was swept by the refresh", m.readings()[1].isOn() and m.nameOf(A("93.184.216.34")) == "cdn.example.net" and m.nameOf(A("8.8.8.8")) == "")
 check("an endpoint with a name", m.endpointText(g.Endpoint(A("52.1.2.3"), 443)) == "api.stripe.com:443" and m.endpointText(g.Endpoint(A("8.8.8.8"), 53)) == "8.8.8.8:53" and m.endpointText(g.Endpoint(A("52.1.2.3"), 0)) == "api.stripe.com")
 check("a socket in one line", m.describe(m.sockets().at(1)) == "tcp 192.168.1.20:51000 → cdn.example.net:443 established — editor [21]", m.describe(m.sockets().at(1)))
-check("a listener, a socket whose owner went, a socket nobody can see", m.describe(m.sockets().at(0)) == "tcp 0.0.0.0:443 listening — editor [21]" and m.describe(m.sockets().at(3)).endswith("— (exited) [9999]") and m.describe(m.sockets().at(4)) == "udp 0.0.0.0:5353 open — (owner not visible)", [m.describe(m.sockets().at(i)) for i in (0, 3, 4)])
-check("the sources and their states", [r.name for r in m.readings()] == ["connection tables", "dns cache"] and all(r.isOn() for r in m.readings()))
+check("a listener, a socket whose owner went, a socket nobody can see", m.describe(m.sockets().at(0)) == "tcp 0.0.0.0:443 listening — editor [21]" and m.describe(m.sockets().at(3)).endswith("— (exited) [9999]") and m.describe(m.sockets().at(4)) == "udp 0.0.0.0:5353 open — (owner not visible) of user 1000", [m.describe(m.sockets().at(i)) for i in (0, 3, 4)])
+check("the sources: the tables are partial because one socket has no visible process, and say so", [r.name for r in m.readings()] == ["connection tables", "dns cache"] and m.readings()[0].state == g.ReadingState.Partial and m.readings()[0].isRunning() and not m.readings()[0].isOn() and "1 of 5 sockets" in m.readings()[0].note and m.readings()[1].isOn(), m.readings()[0].describe())
+check("a socket whose process is out of sight still says whose it is", m.sockets().at(4).hasUser() and not m.sockets().at(4).hasOwner() and m.sockets().at(4).ownerLabel() == "user 1000" and m.sockets().at(1).ownerLabel() == "pid 21", m.sockets().at(4).ownerLabel())
+check("the sockets with no owning process can be taken as a table, and are not dropped", m.sockets().withoutOwner().size() == 1 and m.sockets().size() == 5 and m.sockets().ofUser(1000).size() == 5)
+check("the line for one says the user", m.describe(m.sockets().at(4)) == "udp 0.0.0.0:5353 open — (owner not visible) of user 1000" or m.describe(m.sockets().at(4)).endswith("of user 1000"), m.describe(m.sockets().at(4)))
 
 # a machine on which the resolver's cache cannot be read still joins everything else
 def unsupported():
@@ -76,7 +79,7 @@ def unsupported():
 g.DnsSys.cache = staticmethod(unsupported)
 m2 = g.Machine()
 m2.refresh()
-check("no resolver cache: names stay addresses, and the reading says why", m2.describe(m2.sockets().at(1)) == "tcp 192.168.1.20:51000 → 93.184.216.34:443 established — editor [21]" and not m2.readings()[1].capable and m2.readings()[0].isOn())
+check("no resolver cache: names stay addresses, and the reading says why", m2.describe(m2.sockets().at(1)) == "tcp 192.168.1.20:51000 → 93.184.216.34:443 established — editor [21]" and not m2.readings()[1].capable and m2.readings()[0].isRunning())
 
 print("all ok" if not fails else "FAILED: %s" % fails)
 sys.exit(1 if fails else 0)

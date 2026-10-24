@@ -21,7 +21,7 @@
 use crate::core::{
     addrtext, asinfo, clock, dnsinfo, dnswire, error, fsinfo, fsparse, fswatch, guard, ident, index,
     list, netaddr, netinfo, netparse, plan, privilege, process, procstat, reading, scan, support,
-    sysinfo, text, trace, units, watch,
+    sysinfo, text, trace, units, uri, watch,
 };
 
 use crate::raw::{buf, mem, sockaddr, wide};

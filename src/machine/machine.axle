@@ -122,7 +122,7 @@ pub class Machine {
     /** The name of the process that owns `socket`, or a phrase that says why there is none. */
     pub fn ownerName(self, socket : SocketInfo) : string {
         if (!socket.hasOwner()) {
-            return NOT_VISIBLE;
+            return socket.hasUser() ? NOT_VISIBLE + " of user " + socket.uid.toString() : NOT_VISIBLE;
         }
         let at : i32 = self.byPid.get(socket.pid);
         return at < 0 ? EXITED : self.infos[at as i64].name;
@@ -183,12 +183,13 @@ pub class Machine {
     }
 
     /**
-     * What each source is doing: the polled tables are on once read, the resolver's cache says for itself.
+     * What each source is doing: the polled tables are on once read (partial when some sockets have no
+     * visible owner), the resolver's cache says for itself.
      */
     pub fn readings(self) : ReadingStatus[] {
         let mut out : ReadingStatus[] = malloc<ReadingStatus>(2 as i64);
         out[0 as i64] = self.hasRead()
-            ? ReadingStatus::on("connection tables", "the processes and sockets as of the last refresh")
+            ? Net::socketsStatus(self.table)
             : ReadingStatus::off("connection tables", "not read yet");
         out[1 as i64] = self.dns.status();
         return out;

@@ -17,6 +17,8 @@ use crate::core::netaddr::Addr;
 use crate::core::dnsinfo::DnsCache;
 use crate::core::dnswire::Arpa;
 use crate::core::asinfo::{AsOrigin, Cymru};
+use crate::core::reading::ReadingStatus;
+use crate::core::privilege::Privilege;
 use crate::core::netinfo::{SocketTable, IfaceInfo, IfaceTable, IfaceKind, RouteInfo, RouteTable};
 use crate::sys::netsys::NetSys;
 use crate::sys::dnssys::DnsSys;
@@ -27,6 +29,30 @@ pub class Net {
     /** Every TCP and UDP socket on the machine. */
     pub static fn sockets() : SocketTable ! SysError {
         return NetSys::sockets();
+    }
+
+    /**
+     * What the table of sockets read: on when every socket has its owning process, *partial* when some have
+     * none. On Linux a user who is not elevated sees the process of their own sockets only; the others still
+     * say which user owns them (`uid`) and are kept in the table, but their `pid` is -1. The note says how
+     * many, and what would show the rest, so that a display can say it too instead of dropping them.
+     */
+    pub static fn socketsStatus(table : SocketTable) : ReadingStatus {
+        let n : i32 = table.unowned();
+        if (n == 0) {
+            return ReadingStatus::on(
+                "connection tables",
+                table.size().toString() + " sockets, every owner visible"
+            );
+        }
+        let why : string = Os::privilege() == Privilege::User && Os::name() == "linux"
+            ? "an elevated session sees every process's sockets; the others still name their user"
+            : "the system did not name their owner";
+        return ReadingStatus::partial(
+            "connection tables",
+            n.toString() + " of " + table.size().toString()
+                + " sockets have no visible owning process: " + why
+        );
     }
 
     /** The sockets one process owns. */

@@ -20,7 +20,8 @@ pub class NetSys {
                 new Endpoint(Addr::parse("0.0.0.0"), 443),
                 Endpoint::none(),
                 TcpState::Listen,
-                4
+                4,
+                0
             )
         );
         t.add(
@@ -29,7 +30,8 @@ pub class NetSys {
                 new Endpoint(Addr::parse("192.168.1.20"), 51000),
                 new Endpoint(Addr::parse("93.184.216.34"), 443),
                 TcpState::Established,
-                4120
+                4120,
+                1000
             )
         );
         t.add(
@@ -38,7 +40,8 @@ pub class NetSys {
                 new Endpoint(Addr::parse("192.168.1.20"), 51001),
                 new Endpoint(Addr::parse("192.168.1.5"), 445),
                 TcpState::Established,
-                4120
+                4120,
+                1000
             )
         );
         t.add(
@@ -47,7 +50,8 @@ pub class NetSys {
                 new Endpoint(Addr::parse("0.0.0.0"), 5353),
                 Endpoint::none(),
                 TcpState::Open,
-                -1
+                -1,
+                1000
             )
         );
         return t;

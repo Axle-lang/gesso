@@ -146,7 +146,8 @@ pub class NetTables {
             NetTables::endpointAt(table, row, layout.localAddr, layout.localPort, layout.family),
             NetTables::endpointAt(table, row, layout.remoteAddr, layout.remotePort, layout.family),
             state,
-            table.u32At(row + layout.pid)
+            table.u32At(row + layout.pid),
+            -1
         );
     }
 

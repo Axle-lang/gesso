@@ -1,17 +1,17 @@
 // sys/desksys — the desktop, on Linux: showing a file in the file manager.
 //
-// There is no portable way to ask a Linux file manager to *select* a file: that is a D-Bus call
-// (`org.freedesktop.FileManager1.ShowItems`) that not every desktop answers. What every desktop has is
-// `xdg-open`, which opens a folder in the user's file manager. So a folder is opened itself, and a file's
-// folder is opened: the file is shown among its neighbours, not highlighted. A machine with no `xdg-open`
-// (a server, a minimal container) says `Unsupported`.
+// Linux has no single way to ask a file manager to *select* a file. The D-Bus call that does
+// (`org.freedesktop.FileManager1.ShowItems`) is answered by Nautilus, Dolphin, Thunar and most others, so it
+// is tried first; where nothing answers (no session bus, a file manager that does not implement it) the
+// file's folder is opened with `xdg-open` and the file is shown among its neighbours, not highlighted. A
+// machine with neither (a server, a minimal container) says `Unsupported`.
 
-use std::sys::process::{ProcessBuilder, Process};
 use crate::core::error::{SysError, Unsupported, OsFailure};
 use crate::core::fsinfo::FileStat;
 use crate::core::scan::Scan;
 use crate::core::text::{Utf8, Utf16};
 use crate::sys::fssys::FsSys;
+use crate::sys::filemanager::FileManager;
 
 /** The desktop. */
 pub class DeskSys {
@@ -19,20 +19,24 @@ pub class DeskSys {
     pub static fn reveal(path : i32[]) : void ! SysError {
         let text : string = Utf16::decode(path, path.length as i32);
         let st : FileStat = FsSys::stat(text);
+        if (FileManager::select(text)) {
+            return;
+        }
         let mut folder : string = text;
         if (!st.isDir()) {
             let cut : i64 = Scan::lastIndexOf(text, 47, 0, text.byteLength);
             folder = cut <= 0 ? "/" : Utf8::slice(text, 0, cut);
         }
-        try {
-            let p : Process = new ProcessBuilder("xdg-open").addArg(folder).start();
-            defer p.close();
-            let code : i32 = p.waitFor();
-            if (code != 0) {
-                throw OsFailure("desk.reveal", code, "xdg-open");
-            }
-        } catch e : IOException {
-            throw Unsupported("desk.reveal", "linux", "no xdg-open to ask the file manager: " + e.message);
+        let code : i32 = FileManager::open(folder);
+        if (code < 0) {
+            throw Unsupported(
+                "desk.reveal",
+                "linux",
+                "neither a file manager on the session bus nor xdg-open answered"
+            );
+        }
+        if (code != 0) {
+            throw OsFailure("desk.reveal", code, "xdg-open");
         }
     }
 }

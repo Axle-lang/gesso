@@ -36,7 +36,7 @@
 > [zaffre](https://github.com/Axle-lang/zaffre) the picture; gesso is what they are painted on — the
 > machine.
 
-> **Status.** The portable half — parsers, tables, arithmetic, the whole API — is run, 437 checks, over fixed
+> **Status.** The portable half — parsers, tables, arithmetic, the whole API — is run, 444 checks, over fixed
 > fake machines. The half that touches the operating system (`raw/` and `sys/`) can only be proved on one:
 > `axle check` is the last word, `examples/probe` is the first program to run, and
 > [`LIMITATIONS.md`](LIMITATIONS.md) lists, one by one, what is proven, what is only checked, and which
@@ -53,13 +53,13 @@
 | **Failure** | Every refusal is a `SysError` — an `IOException`, so a caller already declaring one carries it onward — and the most precise of eight reasons: `Denied` names the privilege it lacked, `Gone` and `Absent` say which, `Unsupported` says where. An OS number never reaches a caller bare, and nothing returns `false` for "the system said no" |
 | **Asking first** | Every `Change` and `Admin` operation has a `can…` that answers *yes*, *yes with this privilege*, *not here* or *cannot tell*, and a `plan…` that says what it would do and how to put it back — before it does anything |
 | **Portability** | A seam is one module path with one file per port. `tools/check.py` holds both files to the same public surface, keeps `extern "C"` inside `sys/<port>/` and `unsafe` inside `raw/`, and refuses a shared file that imports a module only one port has |
-| **Verification** | What cannot run without a machine is separated from what can: the portable half — parsers, tables, arithmetic, the whole API — is translated to Python and run, 437 checks, over fixed fake machines |
+| **Verification** | What cannot run without a machine is separated from what can: the portable half — parsers, tables, arithmetic, the whole API — is translated to Python and run, 444 checks, over fixed fake machines |
 | **Known limits** | All of them, with what each would take to lift: [`LIMITATIONS.md`](LIMITATIONS.md) |
 
 ## ✨ Highlights
 
 - 🌳 **Processes as the tree they are** — `Procs::tree()` lays the list out depth first. A parent that has exited, an id the system reused for a younger process, a process that names itself, a loop of parents: all become roots, never a lie about the shape.
-- 🔌 **Sockets that know their owner** — Windows answers with one call per table; on Linux the owner is found by searching every process's open files for the socket's inode, and a socket whose owner the system will not show reads `pid` −1 and is *counted* (`unowned()`), not hidden.
+- 🔌 **Sockets that know their owner** — Windows answers with one call per table; on Linux the owner is found by searching every process's open files for the socket's inode, and a socket whose process the system will not show reads `pid` −1 but still names its **user** (`uid`), stays in the table (`withoutOwner()`), and makes `Net::socketsStatus` say *partial*, with what would show the rest — a display shows it and does not drop it.
 - 🧭 **Addresses that behave** — one `Addr` for IPv4 and IPv6: parse any written form, print RFC 5952, `kind()` (private, loopback, link-local, public…), `inSubnet()`, and an IPv4-mapped IPv6 address equals its IPv4 twin.
 - 🔎 **Tables that narrow** — `Net::sockets().listening().ofPid(4120).external()`: each step is a new table of copied rows, so tables never share state and any of them may be kept.
 - 🗺️ **Routing that answers like the system** — `Net::routeTo(addr)` takes the longest prefix and, among equals, the lowest metric. `Net::primary()`, `gateway()`, `localAddress()`, `isOnline()` are built on it.
@@ -190,13 +190,14 @@ signatures, so a target with a missing answer fails *here*, not in a build far f
 | `tools/check.py` | every file parses; names, arities, mutability and exhaustiveness resolve; layers never reach upward; `extern "C"` only in ports, `unsafe` only in `raw/`; every port answers a seam alike; a shared file imports only what every port has |
 | `tools/check.py --selftest` | plants 25 faults, one at a time, and fails if the checker accepts any |
 | `tools/gen_lib.py --check` | `src/lib.axle` names every module a build must see |
-| `tools/axpy/` | an Axle → Python translator that runs the portable half — 437 checks over fixed fake machines |
+| `tools/axpy/` | an Axle → Python translator that runs the portable half — 444 checks over fixed fake machines |
 
 ```bash
 python3 tools/check.py
 python3 tools/check.py --selftest
 python3 tools/gen_lib.py --check
 for t in core proc net fs system dns desk trace machine; do python3 tools/axpy/test_$t.py; done
+python3 tools/axpy/live_linux.py   # the same parsers, on this machine's real /proc and /sys (Linux)
 tools/img/render.sh            # the pictures above, from tools/img/*.html
 ```
 

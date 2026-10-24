@@ -52,7 +52,9 @@ pub class Desk {
     /** Whether a file can be shown, so far as it can be known beforehand. */
     pub static fn canReveal() : Support {
         if (Os::name() == "linux") {
-            return Support::unknown("it needs xdg-open, and shows the folder rather than selecting the file");
+            return Support::unknown(
+                "it selects the file if the file manager answers on the session bus, else opens its folder"
+            );
         }
         return Support::yes();
     }

@@ -85,7 +85,7 @@ r0, r1, r2 = t.at(0), t.at(1), t.at(2)
 check("a listening socket on loopback", r0.local.text() == "127.0.0.1:53" and r0.isListening() and r0.remote.isEmpty(), r0.describe())
 check("an established connection", r1.local.text() == "10.0.2.15:51176" and r1.remote.text() == "91.193.42.20:443" and r1.state == g.TcpState.Established, r1.describe())
 check("time wait", r2.state == g.TcpState.TimeWait)
-check("the owner is not known yet", r0.pid == -1 and r0.describe() == "tcp 127.0.0.1:53 listening")
+check("the process is not known yet, but the user is: the file says it", r0.pid == -1 and r0.uid == 101 and r1.uid == 1000 and r2.uid == 0 and r0.hasUser() and not r0.hasOwner() and r0.ownerLabel() == "user 101" and r0.describe() == "tcp 127.0.0.1:53 listening (user 101)", r0.describe())
 check("an external peer is told from an internal one", r1.isExternal() and not r0.isExternal())
 
 TCP6 = """  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
@@ -104,7 +104,7 @@ UDP = """   sl  local_address rem_address   st tx_queue rx_queue tr tm->when ret
 scanu = g.SocketScan()
 g.NetText.sockets(UDP, g.Proto.Udp, scanu)
 tu = scanu.table
-check("a UDP socket has no state", tu.size() == 1 and tu.at(0).state == g.TcpState.Open and tu.at(0).local.text() == "0.0.0.0:68" and tu.at(0).describe() == "udp 0.0.0.0:68 open")
+check("a UDP socket has no state", tu.size() == 1 and tu.at(0).state == g.TcpState.Open and tu.at(0).local.text() == "0.0.0.0:68" and tu.at(0).describe() == "udp 0.0.0.0:68 open (user 0)")
 
 junk = g.SocketScan()
 g.NetText.sockets("zzz\n1: nothex:zz 0:0 xx 0 0 0 0 0 5\n\n", g.Proto.Tcp, junk)

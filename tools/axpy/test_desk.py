@@ -84,5 +84,12 @@ cache.clear()
 check("clearing makes it ask again", cache.size() == 0 and not cache.knows(procs[2]) and cache.pathOf(procs[2]) == "/usr/bin/editor")
 g.ProcSys.imagePath = real
 
+# --- file URIs, for the Linux file manager ---------------------------------------------------------------
+U = g.FileUri
+check("a plain path", U.encode("/home/me/a.txt") == "file:///home/me/a.txt")
+check("spaces and punctuation are encoded", U.encode("/home/me/a b#c%d.txt") == "file:///home/me/a%20b%23c%25d.txt")
+check("UTF-8 bytes are encoded one by one", U.encode("/home/zoé/日.txt") == "file:///home/zo%C3%A9/%E6%97%A5.txt", U.encode("/home/zoé/日.txt"))
+check("the safe marks stay", U.encode("/a-b_c.d~e/f") == "file:///a-b_c.d~e/f")
+
 print("all ok" if not fails else "FAILED: %s" % fails)
 sys.exit(1 if fails else 0)
