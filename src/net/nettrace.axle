@@ -1,0 +1,110 @@
+// nettrace — a live trace of the network: bytes per process, connections too short for polling, names
+// resolved.
+//
+//     let trace : NetTrace = NetTrace::start();             // needs the right to trace
+//     loop {
+//         trace.poll();                                      // take what has happened since last time
+//         let sent : i64 = trace.counters().bytesSent(pid);
+//         … trace.status().describe() …
+//     }
+//
+// The tables `Net::sockets()` reads say who has a socket now. They cannot say how much went through it,
+// and a connection that opened and closed between two reads is not in them at all. A trace can: the
+// system reports every send, receive and connect as it happens, with the process that did it, and every
+// name a program resolves. `poll` takes what has collected and adds it to running counts; it never blocks.
+//
+// Tracing is not free of cost or of right. It needs an elevated session on Windows (`Denied`, naming it),
+// and there is no equivalent on Linux that does not need eBPF (`Unsupported`). A program that shows a
+// traffic column should show the trace's `status` beside it: an empty column that means "nothing was
+// sent" and one that means "nothing measures it" are not the same, and must not look it.
+
+use crate::core::error::{SysError, Unsupported};
+use crate::core::privilege::Privilege;
+use crate::core::reading::ReadingStatus;
+use crate::core::support::Support;
+use crate::core::trace::TraceCounters;
+use crate::sys::os::Os;
+use crate::sys::tracesys::{TraceSys, TraceSession};
+
+/** What is read. */
+const TRACE_SOURCE : string = "kernel trace";
+
+/** How many connection events the counters keep. */
+const KEEP : i32 = 512;
+
+/** A running trace and what it has counted. */
+pub class NetTrace {
+    session : TraceSession;
+    counts : TraceCounters;
+    stopped : bool = false;
+
+    /** A trace over a started session; use `start`. */
+    constructor(session : TraceSession) {
+        self.session = session;
+        self.counts = new TraceCounters(KEEP);
+    }
+
+    /** Start tracing. */
+    pub static fn start() : NetTrace ! SysError {
+        return new NetTrace(TraceSys::start());
+    }
+
+    /** Whether tracing can be started here, so far as it can be known beforehand. */
+    pub static fn canStart() : Support {
+        if (Os::name() == "linux") {
+            return Support::unsupported("per-process traffic counts need eBPF or a packet capture");
+        }
+        return Support::withPrivilege(
+            Privilege::Elevated,
+            "a real-time kernel trace needs an administrator, or a member of Performance Log Users"
+        );
+    }
+
+    /** The status to show when `start` said `Unsupported`: off for good, and why. */
+    pub static fn unavailable(failure : Unsupported) : ReadingStatus {
+        return ReadingStatus::unavailable(TRACE_SOURCE, failure.message);
+    }
+
+    /**
+     * The status to show when `start` failed any other way (`Denied`, say): off until what it needs is held.
+     */
+    pub static fn refused(failure : SysError) : ReadingStatus {
+        return ReadingStatus::off(TRACE_SOURCE, failure.message);
+    }
+
+    /** Take the events that have collected since the last call and count them. Answers how many were read. */
+    pub fn poll(mut self) : i32 {
+        return self.stopped ? 0 : self.session.drain(self.counts);
+    }
+
+    /** The counts so far. */
+    pub fn counters(self) : TraceCounters {
+        return self.counts;
+    }
+
+    /**
+     * What the trace is doing: on, or lost when events were dropped for want of a `poll`, or off once
+     * stopped.
+     */
+    pub fn status(self) : ReadingStatus {
+        if (self.stopped || !self.session.isOpen()) {
+            return ReadingStatus::off(
+                TRACE_SOURCE,
+                "the trace was stopped; its counts are frozen at the last reading"
+            );
+        }
+        if (self.session.dropped() > 0) {
+            return ReadingStatus::lost(
+                TRACE_SOURCE,
+                self.session.dropped().toString() + " events were lost for want of a poll; the counts are low"
+            );
+        }
+        return ReadingStatus::on(TRACE_SOURCE, "bytes per process, short connections and resolved names");
+    }
+
+    /** Stop the trace. The counts stay readable. */
+    pub fn stop(mut self) : void {
+        self.session.stop();
+        self.stopped = true;
+    }
+}

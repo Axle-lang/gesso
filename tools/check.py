@@ -368,7 +368,7 @@ def check_file(path, idx, smalt, smalt_methods, errors, rel_root):
 
     # --- seam --------------------------------------------------------------------
     top = mod[0] if mod else None
-    if re.search(r'extern\s+"C"', strip_comments(open(path, encoding="utf-8").read())) and top not in EXTERN_DIRS:
+    if re.search(r'extern\s+"C"\s+(?:from|fn)\b', strip_comments(open(path, encoding="utf-8").read())) and top not in EXTERN_DIRS:
         err('`extern "C"` outside src/sys/<port>/ — only a port names an operating system')
     if re.search(r"\bunsafe\b", text) and top not in UNSAFE_DIRS:
         err("`unsafe` outside src/raw/ — raw memory is confined there")

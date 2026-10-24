@@ -1,0 +1,65 @@
+// sys/tracesys — the live network trace, on Windows: Event Tracing, read through a ring.
+//
+// `start` makes a real-time session of the Kernel-Network and DNS-Client providers (which needs the right
+// to trace: an elevated session) and returns a `TraceSession`. The session's events collect in a ring
+// while the program does other things; `drain` takes what has collected, decodes each event (`core/trace`)
+// and gives it to a `TraceCounters`. Nothing blocks: `drain` returns at once with what there is.
+
+use crate::core::error::SysError;
+use crate::core::trace::{TraceEvent, TraceCounters, KernelNet, DnsClient};
+use crate::sys::etwring::EtwRing;
+use crate::sys::etwsession::EtwSession;
+
+/** A running trace. */
+pub class TraceSession {
+    session : EtwSession;
+
+    /** A trace over the running session `session`. */
+    constructor(session : EtwSession) {
+        self.session = session;
+    }
+
+    /**
+     * Decode the events that have collected and add them to `into`; answers how many were read. Events of
+     * an id this does not decode are read and dropped.
+     */
+    pub fn drain(mut self, into : TraceCounters) : i32 {
+        let ring : EtwRing = self.session.ring();
+        let mut taken : i32 = 0;
+        while (ring.waiting() > 0) {
+            let (id, pid, data) = ring.take();
+            if (id >= 0) {
+                let n : i32 = EtwRing::dataLength(data);
+                let event : TraceEvent = id == DnsClient::completedId()
+                    ? DnsClient::decode(id, pid, data, n)
+                    : KernelNet::decode(id, data, n);
+                into.add(event);
+                taken = taken + 1;
+            }
+        }
+        return taken;
+    }
+
+    /** How many events were lost because `drain` was not called often enough. */
+    pub fn dropped(self) : i64 {
+        return self.session.ring().dropped();
+    }
+
+    /** Whether the trace is still running. */
+    pub fn isOpen(self) : bool {
+        return self.session.isOpen();
+    }
+
+    /** Stop the trace. Stopping twice is harmless. */
+    pub fn stop(mut self) : void {
+        self.session.stop();
+    }
+}
+
+/** The live trace. */
+pub class TraceSys {
+    /** Start tracing. */
+    pub static fn start() : TraceSession ! SysError {
+        return new TraceSession(EtwSession::start());
+    }
+}

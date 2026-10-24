@@ -1,0 +1,125 @@
+// sys/etwring — where the trace's events wait between the thread that receives them and the program.
+//
+// Event Tracing delivers each event by calling a function, on a thread of its own (`ProcessTrace` blocks
+// and calls back until the session ends). That function cannot capture anything and may not throw, so it
+// cannot hand the event to a program directly: it writes it into a ring of fixed-size slots in memory the
+// session owns, which reaches the callback as the record's `UserContext`, and the program reads the ring
+// when it chooses (`drain`). One writer and one reader, no lock: the writer fills a slot and then moves
+// the write counter on; the reader trusts the counter. That is sound on the x86-64 targets this library
+// serves, where stores are seen in the order they were made; a port to another processor would need a
+// barrier here, and this is the only file that would.
+//
+// A reader that falls more than the ring's size behind loses the oldest events, and is told how many.
+
+use crate::sys::advapi32::{ER_PID, ER_ID, ER_DATA_LENGTH, ER_DATA, ER_CONTEXT};
+use crate::raw::mem::Raw;
+use crate::raw::buf::Buf;
+
+/**
+ * Slots in the ring, and the size of one: a header of 24 bytes and room for 1000 bytes of the event's data.
+ */
+const RING_SLOTS : i64 = 1024;
+const SLOT_SIZE : i64 = 1024;
+const SLOT_DATA : i64 = 24;
+const DATA_MAX : i64 = 1000;
+
+/** The ring's own header: how many events have been written, and how many were too big to keep whole. */
+const RING_HEADER : i64 = 64;
+const RING_WRITTEN : i64 = 0;
+const RING_TRUNCATED : i64 = 8;
+
+/** Fields of a slot: the event id, how many bytes of data, the process that was running when it fired. */
+const SLOT_ID : i64 = 0;
+const SLOT_LENGTH : i64 = 4;
+const SLOT_PID : i64 = 8;
+
+/** The callback `ProcessTrace` makes for each event: copy it into the ring that `UserContext` points at. */
+fn onEvent(record : ptr) : void {
+    let ring : ptr = Raw::ptrAt(record, ER_CONTEXT);
+    if (Raw::isNil(ring)) {
+        return;
+    }
+    let written : i64 = Raw::i64At(ring, RING_WRITTEN);
+    let slot : ptr = Raw::plus(ring, RING_HEADER + (written % RING_SLOTS) * SLOT_SIZE);
+    let length : i64 = Raw::u16At(record, ER_DATA_LENGTH);
+    let keep : i64 = length < DATA_MAX ? length : DATA_MAX;
+    Raw::putI32(slot, SLOT_ID, Raw::u16At(record, ER_ID));
+    Raw::putI32(slot, SLOT_LENGTH, keep as i32);
+    Raw::putI32(slot, SLOT_PID, Raw::i32At(record, ER_PID));
+    let data : ptr = Raw::ptrAt(record, ER_DATA);
+    if (!Raw::isNil(data) && keep > 0) {
+        Raw::copy(Raw::plus(slot, SLOT_DATA), data, keep);
+    }
+    if (keep < length) {
+        Raw::putI64(ring, RING_TRUNCATED, Raw::i64At(ring, RING_TRUNCATED) + 1);
+    }
+    Raw::putI64(ring, RING_WRITTEN, written + 1);
+}
+
+/** The ring, from the reader's side. */
+pub class EtwRing {
+    block : Buf;
+    read : i64 = 0;
+    lost : i64 = 0;
+
+    /** An empty ring. */
+    constructor() {
+        self.block = new Buf(RING_HEADER + RING_SLOTS * SLOT_SIZE);
+    }
+
+    /** Where the callback finds the ring: the address to give as the trace's context. */
+    pub fn context(self) : ptr {
+        return self.block.ptr();
+    }
+
+    /** The callback to give the trace. */
+    pub static fn callback() : ptr {
+        return Raw::callback(onEvent);
+    }
+
+    /** How many events are waiting to be taken. */
+    pub fn waiting(self) : i64 {
+        let ahead : i64 = self.block.i64At(RING_WRITTEN) - self.read;
+        return ahead < RING_SLOTS ? ahead : RING_SLOTS;
+    }
+
+    /**
+     * Take the oldest waiting event: its id, its process, and its data as bytes. After a reader that fell
+     * further behind than the ring holds, the events that were overwritten are counted in `dropped`.
+     */
+    pub fn take(mut self) : (id: i32, pid: i64, data: i32[]) {
+        let written : i64 = self.block.i64At(RING_WRITTEN);
+        if (written - self.read > RING_SLOTS) {
+            self.lost = self.lost + (written - self.read - RING_SLOTS);
+            self.read = written - RING_SLOTS;
+        }
+        if (self.read >= written) {
+            return (-1, 0, malloc<i32>(1 as i64));
+        }
+        let at : i64 = RING_HEADER + (self.read % RING_SLOTS) * SLOT_SIZE;
+        let n : i32 = self.block.i32At(at + SLOT_LENGTH);
+        let mut bytes : i32[] = malloc<i32>((n + 1) as i64);
+        for (i of 0..n) {
+            bytes[i as i64] = self.block.u8At(at + SLOT_DATA + (i as i64));
+        }
+        let id : i32 = self.block.i32At(at + SLOT_ID);
+        let pid : i64 = self.block.u32At(at + SLOT_PID);
+        self.read = self.read + 1;
+        return (id, pid, bytes);
+    }
+
+    /** Whether the length of the data that `take` returned is its array's length less the spare slot. */
+    pub static fn dataLength(data : i32[]) : i32 {
+        return (data.length as i32) - 1;
+    }
+
+    /** How many events were lost because the reader fell behind. */
+    pub fn dropped(self) : i64 {
+        return self.lost;
+    }
+
+    /** How many events were too big to keep whole (their data was cut). */
+    pub fn truncated(self) : i64 {
+        return self.block.i64At(RING_TRUNCATED);
+    }
+}

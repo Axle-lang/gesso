@@ -1,0 +1,184 @@
+// sys/etwsession — an Event Tracing session: started, fed two providers, read on a task, stopped.
+//
+// A real-time session is made in four steps: `StartTraceW` creates the session (this is what needs the
+// right to trace: an administrator, or a member of "Performance Log Users"); `EnableTraceEx2` turns a
+// provider on in it; `OpenTraceW` opens the consumer side with a callback and a context; and
+// `ProcessTrace` runs the callbacks, blocking until the session is stopped — so it runs on a task of its
+// own. Stopping is `ControlTraceW` with the stop code, which makes `ProcessTrace` return.
+//
+// The two providers are Microsoft-Windows-Kernel-Network (every TCP and UDP transfer and connection, with
+// the process that made it) and Microsoft-Windows-DNS-Client (the names programs resolve). The record
+// layouts used here are written from the headers and have not been run on a machine.
+
+use crate::core::error::{SysError, OsFailure};
+use crate::core::text::Utf16;
+use crate::sys::errno::Errno;
+use crate::sys::kernel32::GetLastError;
+use crate::sys::advapi32::{
+    StartTraceW, ControlTraceW, EnableTraceEx2, OpenTraceW, ProcessTrace, CloseTrace, ETP_SIZE, ETP_TOTAL,
+    ETP_CLIENT_CONTEXT, ETP_FLAGS, ETP_BUFFER_KB, ETP_LOG_MODE, ETP_FILE_OFFSET, ETP_NAME_OFFSET,
+    WNODE_FLAG_TRACED_GUID, EVENT_TRACE_REAL_TIME_MODE, EVENT_TRACE_CONTROL_STOP,
+    EVENT_CONTROL_CODE_ENABLE_PROVIDER, TRACE_LEVEL_VERBOSE, ETL_SIZE, ETL_LOGGER_NAME, ETL_MODE,
+    ETL_CALLBACK, ETL_CONTEXT, ETL_MODE_REAL_TIME_RECORD, GUID_KERNEL_NETWORK_D1, GUID_KERNEL_NETWORK_D2,
+    GUID_KERNEL_NETWORK_D3, GUID_DNS_CLIENT_D1, GUID_DNS_CLIENT_D2, GUID_DNS_CLIENT_D3,
+};
+use crate::sys::etwring::EtwRing;
+use crate::raw::mem::Raw;
+use crate::raw::buf::Buf;
+use crate::raw::wide::Wide;
+
+/** `ERROR_ALREADY_EXISTS`: a session of that name is already running (one left by a program that crashed). */
+const ALREADY_EXISTS : i32 = 183;
+
+/** The size of the properties block: the record, then room for the session's name. */
+const PROPS_TOTAL : i64 = 1024;
+
+/** Run the trace until the session ends. This is the body of the task that owns the callbacks. */
+fn pumpTrace(trace : i64) : i32 {
+    let cell : Buf = new Buf(8);
+    cell.putI64(0, trace);
+    return ProcessTrace(cell.ptr(), 1, Raw::nil(), Raw::nil());
+}
+
+/** A running session. */
+pub class EtwSession {
+    events : EtwRing;
+    name : Buf;
+    props : Buf;
+    logfile : Buf;
+    session : i64;
+    trace : i64;
+    task : Future<i32>;
+    live : bool = true;
+
+    /**
+     * A session `session` is running under `name` and `trace` is its consumer; `ring` receives the events.
+     */
+    constructor(ring : EtwRing, name : Buf, props : Buf, logfile : Buf, session : i64, trace : i64) {
+        self.events = ring;
+        self.name = name;
+        self.props = props;
+        self.logfile = logfile;
+        self.session = session;
+        self.trace = trace;
+        self.task = spawn pumpTrace(trace);
+    }
+
+    /** The ring the callbacks fill. */
+    pub fn ring(self) : EtwRing {
+        return self.events;
+    }
+
+    /** Whether the session is still running. */
+    pub fn isOpen(self) : bool {
+        return self.live;
+    }
+
+    /** Stop the session and wait for the task that read it to finish. Stopping twice is harmless. */
+    pub fn stop(mut self) : void {
+        if (!self.live) {
+            return;
+        }
+        self.live = false;
+        self.props.putI32(ETP_TOTAL, PROPS_TOTAL as i32);
+        ControlTraceW(self.session, self.name.ptr(), self.props.ptr(), EVENT_TRACE_CONTROL_STOP);
+        let ended : i32 = await self.task;
+        CloseTrace(self.trace);
+    }
+
+    /** The properties block for a session called `name`. */
+    pub(file) static fn properties(name : Buf, units : i32) : Buf {
+        let props : Buf = new Buf(PROPS_TOTAL);
+        props.putI32(ETP_TOTAL, PROPS_TOTAL as i32);
+        props.putI32(ETP_CLIENT_CONTEXT, 1);
+        props.putI32(ETP_FLAGS, WNODE_FLAG_TRACED_GUID);
+        props.putI32(ETP_BUFFER_KB, 64);
+        props.putI32(ETP_LOG_MODE, EVENT_TRACE_REAL_TIME_MODE);
+        props.putI32(ETP_FILE_OFFSET, 0);
+        props.putI32(ETP_NAME_OFFSET, ETP_SIZE as i32);
+        for (i of 0..(units + 1)) {
+            props.putU16(ETP_SIZE + (i as i64) * 2, name.u16At((i as i64) * 2));
+        }
+        return props;
+    }
+
+    /** The GUID `d1`-`d2`-`d3`-`tail` as 16 bytes. */
+    pub(file) static fn guid(d1 : i32, d2 : i32, d3 : i32, tail : i32[]) : Buf {
+        let g : Buf = new Buf(16);
+        g.putI32(0, d1);
+        g.putU16(4, d2);
+        g.putU16(6, d3);
+        for (i of 0..8) {
+            g.putU8(8 + (i as i64), tail[i as i64]);
+        }
+        return g;
+    }
+
+    /** Turn on a provider in `session`; raises why not. */
+    pub(file) static fn enable(session : i64, provider : Buf) : void ! SysError {
+        let rc : i32 = EnableTraceEx2(
+            session,
+            provider.ptr(),
+            EVENT_CONTROL_CODE_ENABLE_PROVIDER,
+            TRACE_LEVEL_VERBOSE,
+            -1,
+            0,
+            0,
+            Raw::nil()
+        );
+        if (rc != 0) {
+            Errno::win32("net.trace", "a provider", rc);
+        }
+    }
+
+    /**
+     * Start a session and begin reading it. Raises `Denied` (naming the elevated session) without the right
+     * to trace.
+     */
+    pub static fn start() : EtwSession ! SysError {
+        let label : string = "GessoNetTrace-" + pid().toString();
+        let name : Buf = Wide::alloc(label);
+        let units : i32 = Utf16::length(label);
+        let props : Buf = EtwSession::properties(name, units);
+        let cell : Buf = new Buf(8);
+        let mut rc : i32 = StartTraceW(cell.ptr(), name.ptr(), props.ptr());
+        if (rc == ALREADY_EXISTS) {
+            ControlTraceW(0, name.ptr(), props.ptr(), EVENT_TRACE_CONTROL_STOP);
+            let again : Buf = EtwSession::properties(name, units);
+            rc = StartTraceW(cell.ptr(), name.ptr(), again.ptr());
+        }
+        if (rc != 0) {
+            Errno::win32("net.trace", "the kernel trace session", rc);
+        }
+        let session : i64 = cell.i64At(0);
+        let kernelTail : i32[] = [0x8D, 0xFD, 0x43, 0xD9, 0x79, 0x15, 0x3A, 0x88];
+        let dnsTail : i32[] = [0xA3, 0xFE, 0xA3, 0x78, 0xB0, 0x3D, 0xDB, 0x4D];
+        try {
+            let net : Buf = EtwSession::guid(
+                GUID_KERNEL_NETWORK_D1, GUID_KERNEL_NETWORK_D2, GUID_KERNEL_NETWORK_D3, kernelTail
+            );
+            let dns : Buf = EtwSession::guid(
+                GUID_DNS_CLIENT_D1, GUID_DNS_CLIENT_D2, GUID_DNS_CLIENT_D3, dnsTail
+            );
+            EtwSession::enable(session, net);
+            EtwSession::enable(session, dns);
+        } catch e : SysError {
+            props.putI32(ETP_TOTAL, PROPS_TOTAL as i32);
+            ControlTraceW(session, name.ptr(), props.ptr(), EVENT_TRACE_CONTROL_STOP);
+            throw e;
+        }
+        let ring : EtwRing = new EtwRing();
+        let logfile : Buf = new Buf(ETL_SIZE);
+        Raw::putPtr(logfile.ptr(), ETL_LOGGER_NAME, name.ptr());
+        logfile.putI32(ETL_MODE, ETL_MODE_REAL_TIME_RECORD);
+        Raw::putPtr(logfile.ptr(), ETL_CALLBACK, EtwRing::callback());
+        Raw::putPtr(logfile.ptr(), ETL_CONTEXT, ring.context());
+        let trace : i64 = OpenTraceW(logfile.ptr());
+        if (trace == -1) {
+            let code : i32 = GetLastError();
+            ControlTraceW(session, name.ptr(), props.ptr(), EVENT_TRACE_CONTROL_STOP);
+            Errno::win32("net.trace", "the trace consumer", code);
+        }
+        return new EtwSession(ring, name, props, logfile, session, trace);
+    }
+}

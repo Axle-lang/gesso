@@ -1,0 +1,554 @@
+// trace — what a live trace of the network says, as events and as running counts.
+//
+// The polled tables say which sockets exist and who owns them; they cannot say how many bytes went
+// through, and they miss a connection that opened and closed between two polls. A trace can: the kernel
+// reports every send, every receive and every connect as it happens, with the process that did it. On
+// Windows that is Event Tracing (ETW), read by `net/nettrace`; this file is what is done with what it
+// reads, and it knows nothing of the operating system.
+//
+// Events arrive as the provider's own bytes and are decoded here: Microsoft-Windows-Kernel-Network for
+// TCP and UDP transfers and connections, and Microsoft-Windows-DNS-Client for the names programs
+// resolved. The decoders take the payload as plain bytes, so they are checked on payloads written out by
+// hand. The layouts are the providers' manifests as the author knows them, and one thing in them is
+// assumed rather than known: that a *receive* event names the local end as its destination. If it turns
+// out the other way, `Directions` below is the one place to change.
+
+use crate::core::index::PidIndex;
+use crate::core::list::{List, Values, Copy};
+use crate::core::netaddr::{Addr, Endpoint};
+use crate::core::netinfo::Proto;
+use crate::core::error::Invalid;
+use crate::core::text::{Utf8, Utf16};
+
+/** What a traced event was. */
+pub enum TraceKind : i32 {
+    /** Bytes went out. */
+    Send = 0,
+
+    /** Bytes came in. */
+    Receive = 1,
+
+    /** A connection was opened from this machine. */
+    Connect = 2,
+
+    /** A connection was accepted by this machine. */
+    Accept = 3,
+
+    /** A connection was closed. */
+    Disconnect = 4,
+
+    /** A program resolved a name. */
+    Resolved = 5,
+
+    /** An event this reader does not decode. */
+    Other = 6,
+
+    /** Its name in a sentence. */
+    pub fn label(self) : string {
+        return match self {
+            TraceKind::Send => "sent",
+            TraceKind::Receive => "received",
+            TraceKind::Connect => "connected",
+            TraceKind::Accept => "accepted",
+            TraceKind::Disconnect => "disconnected",
+            TraceKind::Resolved => "resolved",
+            TraceKind::Other => "other",
+        };
+    }
+}
+
+/** One traced event. */
+pub class TraceEvent : Copy<TraceEvent> {
+    /** What it was. */
+    pub kind    : TraceKind;
+
+    /** TCP or UDP; TCP for a name resolution, which has no transport. */
+    pub proto   : Proto;
+
+    /** The process that did it. */
+    pub pid     : i64;
+
+    /** The bytes a send or receive moved; 0 for anything else. */
+    pub bytes   : i64;
+
+    /** This end of the conversation (empty for a name resolution). */
+    pub local   : Endpoint;
+
+    /** The other end (empty for a name resolution). */
+    pub remote  : Endpoint;
+
+    /** For a name resolution, the name asked for; empty otherwise. */
+    pub name    : string;
+
+    /** For a name resolution, what came back, as the system wrote it: "93.184.216.34;2001:db8::1;". */
+    pub answers : string;
+
+    /** An event. */
+    constructor(
+        kind : TraceKind,
+        proto : Proto,
+        pid : i64,
+        bytes : i64,
+        own local : Endpoint,
+        own remote : Endpoint,
+        name : string,
+        answers : string
+    ) {
+        self.kind = kind;
+        self.proto = proto;
+        self.pid = pid;
+        self.bytes = bytes;
+        self.local = local;
+        self.remote = remote;
+        self.name = name;
+        self.answers = answers;
+    }
+
+    /** An event that says nothing: an id this reader does not know, or a payload that was cut short. */
+    pub static fn other(pid : i64) : TraceEvent {
+        return new TraceEvent(
+            TraceKind::Other, Proto::Tcp, pid, 0, Endpoint::none(), Endpoint::none(), "", ""
+        );
+    }
+
+    /** A separate object with the same event. */
+    pub fn copy(self) : TraceEvent {
+        return new TraceEvent(
+            self.kind,
+            self.proto,
+            self.pid,
+            self.bytes,
+            self.local.copy(),
+            self.remote.copy(),
+            self.name,
+            self.answers
+        );
+    }
+
+    /** Whether a reader should count it. */
+    pub fn isKnown(self) : bool {
+        return self.kind != TraceKind::Other;
+    }
+
+    /**
+     * The addresses a name resolution answered with; those the text does not hold as addresses are skipped.
+     */
+    pub fn addresses(self) : Addr[] {
+        let found : List<Addr> = new List<Addr>();
+        let len : i64 = self.answers.byteLength;
+        let mut start : i64 = 0;
+        let mut i : i64 = 0;
+        while (i <= len) {
+            if (i == len || self.answers.byteAt(i) == 59) {
+                if (i > start) {
+                    try {
+                        found.add(Addr::parse(Utf8::slice(self.answers, start, i)));
+                    } catch e : Invalid {
+                        // A record that is not an address (an alias, a type tag) is not one.
+                    }
+                }
+                start = i + 1;
+            }
+            i = i + 1;
+        }
+        return found.toArray();
+    }
+
+    /** One line: "sent 1448 bytes tcp 10.0.0.2:51000 → 93.184.216.34:443 (pid 4120)". */
+    pub fn describe(self) : string {
+        if (self.kind == TraceKind::Resolved) {
+            return "pid " + self.pid.toString() + " resolved " + self.name;
+        }
+        let mut s : string = self.kind.label();
+        if (self.bytes > 0) {
+            s = s + " " + self.bytes.toString() + " bytes";
+        }
+        return s + " " + self.proto.label() + " " + self.local.text() + " → " + self.remote.text()
+            + " (pid " + self.pid.toString() + ")";
+    }
+}
+
+/** Reading the bytes of a payload. */
+pub class Payload {
+    /** The little-endian 16-bit number at `at`, or -1 when it lies past `len`. */
+    pub static fn word(data : i32[], len : i32, at : i32) : i32 {
+        if (at < 0 || at + 2 > len) {
+            return -1;
+        }
+        return data[at as i64] | (data[(at + 1) as i64] << 8);
+    }
+
+    /** The little-endian 32-bit number at `at`, or -1 when it lies past `len`. */
+    pub static fn dword(data : i32[], len : i32, at : i32) : i64 {
+        if (at < 0 || at + 4 > len) {
+            return -1;
+        }
+        let lo : i64 = (data[at as i64] | (data[(at + 1) as i64] << 8)) as i64;
+        let hi : i64 = (data[(at + 2) as i64] | (data[(at + 3) as i64] << 8)) as i64;
+        return lo | (hi << 16);
+    }
+
+    /** A port as the provider stores it: most significant byte first. */
+    pub static fn port(data : i32[], len : i32, at : i32) : i32 {
+        if (at < 0 || at + 2 > len) {
+            return -1;
+        }
+        return (data[at as i64] << 8) | data[(at + 1) as i64];
+    }
+
+    /** The IPv4 address whose four bytes, in network order, start at `at`. */
+    pub static fn v4(data : i32[], at : i32) : Addr {
+        return Addr::v4(data[at as i64], data[(at + 1) as i64], data[(at + 2) as i64], data[(at + 3) as i64]);
+    }
+
+    /** The IPv6 address whose sixteen bytes, in network order, start at `at`. */
+    pub static fn v6(data : i32[], at : i32) : Addr {
+        let mut groups : i32[] = malloc<i32>(8 as i64);
+        for (k of 0..8) {
+            groups[k as i64] = (data[(at + k * 2) as i64] << 8) | data[(at + k * 2 + 1) as i64];
+        }
+        return Addr::fromGroups(groups);
+    }
+
+    /**
+     * The NUL-terminated UTF-16 string at `at`, with the offset just after its NUL; (text, -1) when it has
+     * none inside `len`.
+     */
+    pub static fn wide(data : i32[], len : i32, at : i32) : (text: string, next: i32) {
+        let mut units : i32[] = malloc<i32>(((len - at) / 2 + 1) as i64);
+        let mut n : i32 = 0;
+        let mut i : i32 = at;
+        while (i + 2 <= len) {
+            let u : i32 = data[i as i64] | (data[(i + 1) as i64] << 8);
+            if (u == 0) {
+                return (Utf16::decode(units, n), i + 2);
+            }
+            units[n as i64] = u;
+            n = n + 1;
+            i = i + 2;
+        }
+        return ("", -1);
+    }
+}
+
+/**
+ * What each Microsoft-Windows-Kernel-Network event id is, and where the ends of the conversation lie in it.
+ */
+pub class KernelNet {
+    /** The kind of event id `id` is, or `Other`. */
+    pub static fn kindOf(id : i32) : TraceKind {
+        return match id {
+            10 | 26 | 42 | 58 => TraceKind::Send,
+            11 | 27 | 43 | 59 => TraceKind::Receive,
+            12 | 28 => TraceKind::Connect,
+            13 | 29 => TraceKind::Disconnect,
+            15 | 31 => TraceKind::Accept,
+            _ => TraceKind::Other,
+        };
+    }
+
+    /** Whether id `id` is an IPv6 event. */
+    pub static fn isV6(id : i32) : bool {
+        return id == 26 || id == 27 || id == 28 || id == 29 || id == 31 || id == 58 || id == 59;
+    }
+
+    /** Whether id `id` is a UDP event. */
+    pub static fn isUdp(id : i32) : bool {
+        return id == 42 || id == 43 || id == 58 || id == 59;
+    }
+
+    /**
+     * Whether the event names the local end as its *destination*: what arrives is addressed to this
+     * machine, so for a receive or an accept the packet's destination is local and its source is the
+     * peer. This is the assumption the header names; change it here if a real trace says otherwise.
+     */
+    pub static fn destinationIsLocal(kind : TraceKind) : bool {
+        return kind == TraceKind::Receive || kind == TraceKind::Accept;
+    }
+
+    /**
+     * The event of id `id` whose payload is the first `len` bytes of `data`; `Other` for one this does not
+     * decode or one cut short.
+     */
+    pub static fn decode(id : i32, data : i32[], len : i32) : TraceEvent {
+        let kind : TraceKind = KernelNet::kindOf(id);
+        let v6 : bool = KernelNet::isV6(id);
+        let need : i32 = v6 ? 44 : 20;
+        if (kind == TraceKind::Other || len < need) {
+            return TraceEvent::other(Payload::dword(data, len, 0));
+        }
+        let pid : i64 = Payload::dword(data, len, 0);
+        let size : i64 = Payload::dword(data, len, 4);
+        let destAt : i32 = 8;
+        let srcAt : i32 = v6 ? 24 : 12;
+        let destPort : i32 = Payload::port(data, len, v6 ? 40 : 16);
+        let srcPort : i32 = Payload::port(data, len, v6 ? 42 : 18);
+        let dest : Addr = v6 ? Payload::v6(data, destAt) : Payload::v4(data, destAt);
+        let src : Addr = v6 ? Payload::v6(data, srcAt) : Payload::v4(data, srcAt);
+        let flip : bool = KernelNet::destinationIsLocal(kind);
+        let local : Endpoint = flip ? new Endpoint(dest, destPort) : new Endpoint(src, srcPort);
+        let remote : Endpoint = flip ? new Endpoint(src, srcPort) : new Endpoint(dest, destPort);
+        let moved : bool = kind == TraceKind::Send || kind == TraceKind::Receive;
+        return new TraceEvent(
+            kind,
+            KernelNet::isUdp(id) ? Proto::Udp : Proto::Tcp,
+            pid,
+            moved ? size : 0,
+            local,
+            remote,
+            "",
+            ""
+        );
+    }
+}
+
+/** Microsoft-Windows-DNS-Client. */
+pub class DnsClient {
+    /** The event id of "a query completed". */
+    pub static fn completedId() : i32 {
+        return 3008;
+    }
+
+    /**
+     * The name resolution that event 3008 reports for process `pid`: `QueryName`, `QueryType`,
+     * `QueryOptions`, `QueryStatus` and `QueryResults`, in that order. A query that failed (a non-zero
+     * status) has no answers, but the name is still reported: the program did ask.
+     */
+    pub static fn decode(id : i32, pid : i64, data : i32[], len : i32) : TraceEvent {
+        if (id != 3008) {
+            return TraceEvent::other(pid);
+        }
+        let (name, afterName) = Payload::wide(data, len, 0);
+        if (afterName < 0 || name.byteLength == 0) {
+            return TraceEvent::other(pid);
+        }
+        // QueryType (4 bytes), QueryOptions (8), QueryStatus (4), then QueryResults.
+        let status : i64 = Payload::dword(data, len, afterName + 12);
+        let mut answers : string = "";
+        if (status == 0) {
+            let (text, after) = Payload::wide(data, len, afterName + 16);
+            answers = after < 0 ? "" : text;
+        }
+        return new TraceEvent(
+            TraceKind::Resolved, Proto::Tcp, pid, 0, Endpoint::none(), Endpoint::none(), name, answers
+        );
+    }
+}
+
+/** A name a process resolved, with one address it got. */
+pub class ResolvedName : Copy<ResolvedName> {
+    /** The process that asked. */
+    pub pid  : i64;
+
+    /** The name it asked for. */
+    pub name : string;
+
+    /** One of the addresses it was given. */
+    pub addr : Addr;
+
+    /** A resolution. */
+    constructor(pid : i64, name : string, own addr : Addr) {
+        self.pid = pid;
+        self.name = name;
+        self.addr = addr;
+    }
+
+    /** A separate object with the same resolution. */
+    pub fn copy(self) : ResolvedName {
+        return new ResolvedName(self.pid, self.name, self.addr.copy());
+    }
+}
+
+/** Running counts over a stream of events. */
+pub class TraceCounters {
+    index     : PidIndex;
+    room      : i32;
+    used      : i32 = 0;
+    pids      : i64[];
+    sent      : i64[];
+    received  : i64[];
+    opened    : i64[];
+    recent    : List<TraceEvent>;
+    recentMax : i32;
+    oldest    : i32 = 0;
+    names     : List<ResolvedName>;
+    seen      : i64 = 0;
+
+    /** Counters that have seen nothing; the last `recentMax` connection events are kept. */
+    constructor(recentMax : i32) {
+        self.room = 256;
+        self.index = new PidIndex(self.room);
+        self.pids = malloc<i64>(self.room as i64);
+        self.sent = malloc<i64>(self.room as i64);
+        self.received = malloc<i64>(self.room as i64);
+        self.opened = malloc<i64>(self.room as i64);
+        self.recent = new List<TraceEvent>();
+        self.recentMax = recentMax < 1 ? 1 : recentMax;
+        self.names = new List<ResolvedName>();
+    }
+
+    /** `old` with room for twice as many rows. */
+    pub(file) fn doubled(self, old : i64[]) : i64[] {
+        let mut bigger : i64[] = malloc<i64>((self.room * 2) as i64);
+        for (i of 0..self.used) {
+            bigger[i as i64] = old[i as i64];
+        }
+        return bigger;
+    }
+
+    /** The row of `pid`, made when it is new. */
+    pub(file) fn row(mut self, pid : i64) : i32 {
+        let at : i32 = self.index.get(pid);
+        if (at >= 0) {
+            return at;
+        }
+        if (self.used >= self.room) {
+            self.pids = self.doubled(self.pids);
+            self.sent = self.doubled(self.sent);
+            self.received = self.doubled(self.received);
+            self.opened = self.doubled(self.opened);
+            self.room = self.room * 2;
+            self.index = new PidIndex(self.room);
+            for (i of 0..self.used) {
+                self.index.put(self.pids[i as i64], i);
+            }
+        }
+        self.index.put(pid, self.used);
+        self.pids[self.used as i64] = pid;
+        self.used = self.used + 1;
+        return self.used - 1;
+    }
+
+    /** Count one event. Events of kind `Other` are not counted. */
+    pub fn add(mut self, e : TraceEvent) : void {
+        if (!e.isKnown()) {
+            return;
+        }
+        self.seen = self.seen + 1;
+        if (e.kind == TraceKind::Resolved) {
+            self.addNames(e);
+            return;
+        }
+        let at : i64 = self.row(e.pid) as i64;
+        if (e.kind == TraceKind::Send) {
+            self.sent[at] = self.sent[at] + e.bytes;
+        } else if (e.kind == TraceKind::Receive) {
+            self.received[at] = self.received[at] + e.bytes;
+        } else {
+            if (e.kind != TraceKind::Disconnect) {
+                self.opened[at] = self.opened[at] + 1;
+            }
+            self.remember(e);
+        }
+    }
+
+    /** Keep a connection event among the recent ones, dropping the oldest when full. */
+    pub(file) fn remember(mut self, e : TraceEvent) : void {
+        if (self.recent.size() < self.recentMax) {
+            self.recent.add(e.copy());
+        } else {
+            self.recent.set(self.oldest, e.copy());
+            self.oldest = (self.oldest + 1) % self.recentMax;
+        }
+    }
+
+    /** Keep what a resolution gave, once for each process, name and address. */
+    pub(file) fn addNames(mut self, e : TraceEvent) : void {
+        let addrs : Addr[] = e.addresses();
+        for (i of 0..addrs.length) {
+            let mut known : bool = false;
+            for (k of 0..self.names.size()) {
+                let r : ResolvedName = self.names.at(k);
+                if (r.pid == e.pid && r.name == e.name && r.addr.equals(addrs[i])) {
+                    known = true;
+                }
+            }
+            if (!known) {
+                self.names.add(new ResolvedName(e.pid, e.name, addrs[i].copy()));
+            }
+        }
+    }
+
+    /** How many events have been counted. */
+    pub fn eventsSeen(self) : i64 {
+        return self.seen;
+    }
+
+    /** How many processes have been seen moving or opening something. */
+    pub fn pidCount(self) : i32 {
+        return self.used;
+    }
+
+    /** The id of the process at position `i`, in the order first seen. */
+    pub fn pidAt(self, i : i32) : i64 {
+        return self.pids[i as i64];
+    }
+
+    /** Bytes `pid` has sent since the trace began. */
+    pub fn bytesSent(self, pid : i64) : i64 {
+        let at : i32 = self.index.get(pid);
+        return at < 0 ? 0 : self.sent[at as i64];
+    }
+
+    /** Bytes `pid` has received since the trace began. */
+    pub fn bytesReceived(self, pid : i64) : i64 {
+        let at : i32 = self.index.get(pid);
+        return at < 0 ? 0 : self.received[at as i64];
+    }
+
+    /** Connections `pid` has opened or accepted since the trace began. */
+    pub fn connectionsOf(self, pid : i64) : i64 {
+        let at : i32 = self.index.get(pid);
+        return at < 0 ? 0 : self.opened[at as i64];
+    }
+
+    /** Bytes all processes together have sent. */
+    pub fn totalSent(self) : i64 {
+        let mut sum : i64 = 0;
+        for (i of 0..self.used) {
+            sum = sum + self.sent[i as i64];
+        }
+        return sum;
+    }
+
+    /** Bytes all processes together have received. */
+    pub fn totalReceived(self) : i64 {
+        let mut sum : i64 = 0;
+        for (i of 0..self.used) {
+            sum = sum + self.received[i as i64];
+        }
+        return sum;
+    }
+
+    /** How many connection events are kept (at most the number asked for). */
+    pub fn recentCount(self) : i32 {
+        return self.recent.size();
+    }
+
+    /** The `i`th kept connection event, oldest first. */
+    pub fn recentAt(self, i : i32) : TraceEvent {
+        return self.recent.at((self.oldest + i) % self.recent.size());
+    }
+
+    /** How many (process, name, address) resolutions are kept. */
+    pub fn resolvedCount(self) : i32 {
+        return self.names.size();
+    }
+
+    /** The `i`th resolution, in the order seen. */
+    pub fn resolvedAt(self, i : i32) : ResolvedName {
+        return self.names.at(i);
+    }
+
+    /** The name some process asked for that gave `addr`, or an empty string; the most recent one wins. */
+    pub fn nameFor(self, addr : Addr) : string {
+        let mut i : i32 = self.names.size() - 1;
+        while (i >= 0) {
+            if (self.names.at(i).addr.equals(addr)) {
+                return self.names.at(i).name;
+            }
+            i = i - 1;
+        }
+        return "";
+    }
+}

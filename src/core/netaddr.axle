@@ -13,6 +13,7 @@
 use std::text::StringBuilder;
 use crate::core::error::Invalid;
 use crate::core::ident::Key;
+use crate::core::list::Copy;
 use crate::core::addrtext::AddrText;
 
 /** What an address is for. */
@@ -60,7 +61,7 @@ struct ZeroRun {
 }
 
 /** An IPv4 or IPv6 address. */
-pub class Addr {
+pub class Addr : Copy<Addr> {
     /** 4 or 6. */
     pub family : i32;
     hi         : i64;

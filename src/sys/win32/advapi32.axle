@@ -1,4 +1,4 @@
-// sys/advapi32 — the advapi32 imports the Windows port uses: tokens, and what they say about a process.
+// sys/advapi32 — the advapi32 imports the Windows port uses: tokens, and Event Tracing.
 
 extern "C" from "advapi32" {
     /** `BOOL OpenProcessToken(HANDLE, DWORD, PHANDLE)` — `token` is where the handle is written. */
@@ -6,6 +6,43 @@ extern "C" from "advapi32" {
 
     /** `BOOL GetTokenInformation(HANDLE, TOKEN_INFORMATION_CLASS, LPVOID, DWORD, PDWORD)`. */
     fn GetTokenInformation(token : ptr, cls : i32, info : ptr, len : i32, ret : ptr) : i32;
+
+    /**
+     * `ULONG StartTraceW(PTRACEHANDLE, LPCWSTR name, PEVENT_TRACE_PROPERTIES)` — the session's handle is
+     * written through the first argument. 0 on success, 5 without the right to trace, 183 when a session of
+     * that name exists.
+     */
+    fn StartTraceW(session : ptr, name : ptr, properties : ptr) : i32;
+
+    /** `ULONG ControlTraceW(TRACEHANDLE, LPCWSTR name, PEVENT_TRACE_PROPERTIES, ULONG code)`. */
+    fn ControlTraceW(session : i64, name : ptr, properties : ptr, code : i32) : i32;
+
+    /**
+     * `ULONG EnableTraceEx2(TRACEHANDLE, LPCGUID provider, ULONG control, UCHAR level, ULONGLONG any,
+     * ULONGLONG all, ULONG timeout, PENABLE_TRACE_PARAMETERS)`.
+     */
+    fn EnableTraceEx2(
+        session : i64,
+        provider : ptr,
+        control : i32,
+        level : i32,
+        anyKeyword : i64,
+        allKeyword : i64,
+        timeout : i32,
+        parameters : ptr
+    ) : i32;
+
+    /** `TRACEHANDLE OpenTraceW(PEVENT_TRACE_LOGFILEW)` — all ones on failure. */
+    fn OpenTraceW(logfile : ptr) : i64;
+
+    /**
+     * `ULONG ProcessTrace(PTRACEHANDLE handles, ULONG count, LPFILETIME start, LPFILETIME end)` — blocks
+     * until the trace ends.
+     */
+    fn ProcessTrace(handles : ptr, count : i32, start : ptr, end : ptr) : i32;
+
+    /** `ULONG CloseTrace(TRACEHANDLE)`. */
+    fn CloseTrace(trace : i64) : i32;
 }
 
 /** `TOKEN_QUERY`. */
@@ -16,3 +53,64 @@ const TOKEN_USER : i32 = 1;
 
 /** `TokenElevation` — a `TOKEN_ELEVATION`: one DWORD, non-zero when the token is elevated. */
 const TOKEN_ELEVATION : i32 = 20;
+
+// ─── Event Tracing (x64, from the header's layout; not run) ────────
+
+/**
+ * `EVENT_TRACE_PROPERTIES` (120 bytes, then the session's name): `Wnode.BufferSize` (0),
+ * `Wnode.ClientContext` (40), `Wnode.Flags` (44), `BufferSize` in KB (48), `LogFileMode` (64),
+ * `LogFileNameOffset` (112), `LoggerNameOffset` (116).
+ */
+const ETP_SIZE : i64 = 120;
+const ETP_TOTAL : i64 = 0;
+const ETP_CLIENT_CONTEXT : i64 = 40;
+const ETP_FLAGS : i64 = 44;
+const ETP_BUFFER_KB : i64 = 48;
+const ETP_LOG_MODE : i64 = 64;
+const ETP_FILE_OFFSET : i64 = 112;
+const ETP_NAME_OFFSET : i64 = 116;
+
+/** `WNODE_FLAG_TRACED_GUID`, and `EVENT_TRACE_REAL_TIME_MODE`. */
+const WNODE_FLAG_TRACED_GUID : i32 = 0x20000;
+const EVENT_TRACE_REAL_TIME_MODE : i32 = 0x100;
+
+/** `EVENT_TRACE_CONTROL_STOP`, and `EVENT_CONTROL_CODE_ENABLE_PROVIDER`. */
+const EVENT_TRACE_CONTROL_STOP : i32 = 1;
+const EVENT_CONTROL_CODE_ENABLE_PROVIDER : i32 = 1;
+
+/** `TRACE_LEVEL_VERBOSE`: every event the provider has. */
+const TRACE_LEVEL_VERBOSE : i32 = 5;
+
+/**
+ * `EVENT_TRACE_LOGFILEW` (440 bytes): `LoggerName` (8), `ProcessTraceMode` (28), `EventRecordCallback` (416),
+ * `Context` (432).
+ */
+const ETL_SIZE : i64 = 512;
+const ETL_LOGGER_NAME : i64 = 8;
+const ETL_MODE : i64 = 28;
+const ETL_CALLBACK : i64 = 416;
+const ETL_CONTEXT : i64 = 432;
+
+/** `PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD`. */
+const ETL_MODE_REAL_TIME_RECORD : i32 = 0x10000100;
+
+/**
+ * `EVENT_RECORD` (112 bytes): `EventHeader.ProcessId` (12), `EventHeader.EventDescriptor.Id` (40),
+ * `UserDataLength` (86), `UserData` (96), `UserContext` (104).
+ */
+const ER_PID : i64 = 12;
+const ER_ID : i64 = 40;
+const ER_DATA_LENGTH : i64 = 86;
+const ER_DATA : i64 = 96;
+const ER_CONTEXT : i64 = 104;
+
+/**
+ * The providers: Microsoft-Windows-Kernel-Network and Microsoft-Windows-DNS-Client, as the `D1 D2 D3` of
+ * their GUIDs (the last eight bytes follow).
+ */
+const GUID_KERNEL_NETWORK_D1 : i32 = 0x7DD42A49;
+const GUID_KERNEL_NETWORK_D2 : i32 = 0x5329;
+const GUID_KERNEL_NETWORK_D3 : i32 = 0x4832;
+const GUID_DNS_CLIENT_D1 : i32 = 0x1C95126E;
+const GUID_DNS_CLIENT_D2 : i32 = 0x7EEA;
+const GUID_DNS_CLIENT_D3 : i32 = 0x49A9;

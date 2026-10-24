@@ -46,6 +46,16 @@ pub class Raw {
         }
     }
 
+    /**
+     * The address of the callback `f`, to be written into a record a system call reads (an event-trace log
+     * file, a window class). `f` must be a plain function that captures nothing and throws nothing.
+     */
+    pub static fn callback(f : extern "C" (ptr) => void) : ptr {
+        unsafe {
+            return f as ptr;
+        }
+    }
+
     /** `n` bytes of uninitialised memory from libc, or null. Release with `release`. */
     pub static fn take(n : i64) : ptr {
         return libc_malloc(n);

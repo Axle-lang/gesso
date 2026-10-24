@@ -1,0 +1,43 @@
+// sys/tracesys — the live network trace, on Linux: not available.
+//
+// Per-process byte counts on Linux come from eBPF programs or a packet capture, and both need privileges
+// and kernel features this library does not assume. `start` says `Unsupported` and names the reason, so a
+// program shows a dark badge with a sentence rather than a column that is empty for no stated cause. The
+// class has the same shape as the Windows one so that the code above is written once.
+
+use crate::core::error::{SysError, Unsupported};
+use crate::core::trace::TraceCounters;
+
+/** A trace that never runs. */
+pub class TraceSession {
+    /** Nothing to read. */
+    pub fn drain(mut self, into : TraceCounters) : i32 {
+        return 0;
+    }
+
+    /** Nothing is lost: nothing is read. */
+    pub fn dropped(self) : i64 {
+        return 0;
+    }
+
+    /** It is not running. */
+    pub fn isOpen(self) : bool {
+        return false;
+    }
+
+    /** Nothing to stop. */
+    pub fn stop(mut self) : void {
+    }
+}
+
+/** The live trace. */
+pub class TraceSys {
+    /** Start tracing: `Unsupported` here. */
+    pub static fn start() : TraceSession ! SysError {
+        throw Unsupported(
+            "net.trace",
+            "linux",
+            "per-process traffic counts need eBPF or a packet capture, which this library does not do"
+        );
+    }
+}

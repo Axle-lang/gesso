@@ -1,0 +1,53 @@
+// fakes/tracesys — the `sys::tracesys` seam as the tests see it: a trace with a few events to give.
+//
+// The same public shape as the two ports. The first `drain` hands over six events — a connection, two
+// sends, a receive, a name, an event nobody decodes — and every later one finds nothing.
+
+use crate::core::error::SysError;
+use crate::core::netaddr::{Addr, Endpoint};
+use crate::core::netinfo::Proto;
+use crate::core::trace::{TraceEvent, TraceKind, TraceCounters};
+
+/** A trace that has already happened. */
+pub class TraceSession {
+    given : bool = false;
+    live : bool = true;
+    lost : i64 = 0;
+
+    pub fn drain(mut self, into : TraceCounters) : i32 {
+        if (self.given || !self.live) {
+            return 0;
+        }
+        self.given = true;
+        let here : Endpoint = new Endpoint(Addr::parse("10.0.0.2"), 50000);
+        let there : Endpoint = new Endpoint(Addr::parse("93.184.216.34"), 443);
+        into.add(new TraceEvent(TraceKind::Connect, Proto::Tcp, 4120, 0, here.copy(), there.copy(), "", ""));
+        into.add(new TraceEvent(TraceKind::Send, Proto::Tcp, 4120, 1000, here.copy(), there.copy(), "", ""));
+        into.add(new TraceEvent(TraceKind::Send, Proto::Tcp, 4120, 500, here.copy(), there.copy(), "", ""));
+        into.add(new TraceEvent(TraceKind::Receive, Proto::Tcp, 4120, 4000, here.copy(), there.copy(), "", ""));
+        into.add(new TraceEvent(
+            TraceKind::Resolved, Proto::Tcp, 4120, 0, Endpoint::none(), Endpoint::none(), "example.com", "93.184.216.34;"
+        ));
+        into.add(TraceEvent::other(4120));
+        return 6;
+    }
+
+    pub fn dropped(self) : i64 {
+        return self.lost;
+    }
+
+    pub fn isOpen(self) : bool {
+        return self.live;
+    }
+
+    pub fn stop(mut self) : void {
+        self.live = false;
+    }
+}
+
+/** A trace that always starts. */
+pub class TraceSys {
+    pub static fn start() : TraceSession ! SysError {
+        return new TraceSession();
+    }
+}
