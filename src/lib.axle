@@ -17,6 +17,7 @@
 //   fs       watchers, volumes, permissions, links, atomic operations
 //   desk     notifications, clipboard, hotkeys, windows, the session
 //   diag     logs, events, crash reports, counters
+//   machine  the readings joined: a socket's process, a process's program, an address's name
 use crate::core::{
     addrtext, asinfo, clock, dnsinfo, dnswire, error, fsinfo, fsparse, fswatch, guard, ident, index,
     list, netaddr, netinfo, netparse, plan, privilege, process, procstat, reading, scan, support,
@@ -36,3 +37,6 @@ use crate::net::{dnsreader, net, nettrace, traffic};
 use crate::fs::{fs};
 
 use crate::desk::{desk};
+
+
+use crate::machine::{machine};

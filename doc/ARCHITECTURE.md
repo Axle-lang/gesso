@@ -3,13 +3,16 @@
 ## Layers
 
 ```
- core   →   raw   →   sys   →   system  proc  net  fs  desk  diag
- (vocabulary) (memory) (seams, one directory per port)   (the API modules)
+ core   →   raw   →   sys   →   system  proc  net  fs  desk  diag   →   machine
+ (vocabulary) (memory) (seams, one directory per port)   (the API modules)      (the join)
 ```
 
 A module imports from a layer below its own, or from its own, and from nothing above. The API modules —
-the last six — share the top rank and never import one another: if `net` needs to say which process owns a
-socket, it says a process id (a `core` type), not a `proc` type. `tools/check.py` holds this.
+`system`, `proc`, `net`, `fs`, `desk` and `diag` — share one rank and never import one another: if `net` needs
+to say which process owns a socket, it says a process id (a `core` type), not a `proc` type. The join of
+the three is `machine`, one rank above them, which exists so that no API module has to know another and no
+program has to write the join itself: a socket's process, a process's program, an address's name.
+`tools/check.py` holds this.
 
 | Layer | Holds | May contain |
 |---|---|---|
@@ -17,6 +20,7 @@ socket, it says a process id (a `core` type), not a `proc` type. `tools/check.py
 | `raw` | `Raw` (pointer reads and writes), `Buf` (owned, bounds-checked), `Wide` and `Narrow` (strings across the boundary) | **`unsafe`** — and nowhere else |
 | `sys` | one *seam* per concern: `os`, `procsys`, later `ifaces`, … | **`extern "C"`** — and nowhere else |
 | API | what a program calls | neither |
+| `machine` | the readings joined; it imports the API modules and nothing of the system | neither |
 
 ## Ports and seams
 

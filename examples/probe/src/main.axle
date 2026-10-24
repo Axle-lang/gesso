@@ -10,7 +10,8 @@
 
 use gesso::{
     Host, HostInfo, Power, CpuMeter, Procs, ProcInfo, ProcTree, Net, SocketTable, IfaceTable, Fs,
-    VolumeTable, VolumeInfo, EntryList, SysError, Span,
+    VolumeTable, VolumeInfo, EntryList, SysError, Unsupported, Span, Machine, ReadingStatus, Addr,
+    NetTrace, TraceCounters, Bytes,
 };
 
 /** A heading. */
@@ -93,26 +94,33 @@ fn processes() : void {
     }
 }
 
-/** Who is listening, and which process owns each socket. */
+/** Who is listening, which process owns each socket, and what the addresses are called. */
 fn network() : void {
     section("network");
     try {
-        let procs : ProcInfo[] = Procs::list();
-        let all : SocketTable = Net::sockets();
+        let machine : Machine = new Machine();
+        machine.refresh();
+        let all : SocketTable = machine.sockets();
         println(
             "  " + all.size().toString() + " sockets, " + all.unowned().toString() + " with no visible owner"
         );
         let open : SocketTable = all.listening();
         for (i of 0..open.size()) {
             if (i < 10) {
-                println(
-                    "  listening " + open.at(
-                        i
-                    ).local.text() + "  ← " + nameOf(procs, open.at(i).pid)
-                );
+                println("  " + machine.describe(open.at(i)));
             }
         }
-        println("  " + all.external().size().toString() + " connections to the internet");
+        let outward : SocketTable = all.external();
+        println("  " + outward.size().toString() + " connections to the internet");
+        for (i of 0..outward.size()) {
+            if (i < 8) {
+                println("    " + machine.describe(outward.at(i)));
+            }
+        }
+        let sources : ReadingStatus[] = machine.readings();
+        for (i of 0..sources.length) {
+            println("  " + sources[i].describe());
+        }
         let ifaces : IfaceTable = Net::interfaces();
         for (i of 0..ifaces.size()) {
             println("  " + ifaces.at(i).describe());
@@ -123,6 +131,55 @@ fn network() : void {
         println("  local address: " + Net::localAddress().text());
     } catch e : SysError {
         failed(e);
+    }
+}
+
+/**
+ * Who owns the network, by a reverse lookup: this asks a DNS server, which is the one thing here that leaves
+ * the machine.
+ */
+fn origin() : void {
+    section("who announces 1.1.1.1 (asks DNS)");
+    try {
+        let addr : Addr = Addr::parse("1.1.1.1");
+        println("  reverse: " + Net::reverse(addr));
+    } catch e : SysError {
+        failed(e);
+    }
+    try {
+        println("  origin:  " + Net::origin(Addr::parse("1.1.1.1")).title());
+    } catch e : SysError {
+        failed(e);
+    }
+}
+
+/** A live trace for two seconds: who moved bytes. Needs an elevated session on Windows; Linux has none. */
+fn trace() : void {
+    section("live trace (two seconds)");
+    try {
+        let trace : NetTrace = NetTrace::start();
+        sleep(2000);
+        trace.poll();
+        let counts : TraceCounters = trace.counters();
+        println("  " + trace.status().describe());
+        println(
+            "  " + counts.eventsSeen().toString() + " events · " + Bytes::human(counts.totalSent())
+            + " out · " + Bytes::human(counts.totalReceived()) + " in"
+        );
+        for (i of 0..counts.pidCount()) {
+            if (i < 8) {
+                let pid : i64 = counts.pidAt(i);
+                println(
+                    "    pid " + pid.toString() + "  ↑ " + Bytes::human(counts.bytesSent(pid)) + "  ↓ "
+                    + Bytes::human(counts.bytesReceived(pid))
+                );
+            }
+        }
+        trace.stop();
+    } catch e : Unsupported {
+        println("  " + NetTrace::unavailable(e).describe());
+    } catch e : SysError {
+        println("  " + NetTrace::refused(e).describe());
     }
 }
 
@@ -162,5 +219,7 @@ fn main() : i32 {
     processes();
     network();
     files();
+    origin();
+    trace();
     return 0;
 }

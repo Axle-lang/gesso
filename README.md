@@ -36,7 +36,7 @@
 > [zaffre](https://github.com/Axle-lang/zaffre) the picture; gesso is what they are painted on — the
 > machine.
 
-> **Status.** The portable half — parsers, tables, arithmetic, the whole API — is run, 315 checks, over fixed
+> **Status.** The portable half — parsers, tables, arithmetic, the whole API — is run, 437 checks, over fixed
 > fake machines. The half that touches the operating system (`raw/` and `sys/`) can only be proved on one:
 > `axle check` is the last word, `examples/probe` is the first program to run, and
 > [`LIMITATIONS.md`](LIMITATIONS.md) lists, one by one, what is proven, what is only checked, and which
@@ -53,7 +53,7 @@
 | **Failure** | Every refusal is a `SysError` — an `IOException`, so a caller already declaring one carries it onward — and the most precise of eight reasons: `Denied` names the privilege it lacked, `Gone` and `Absent` say which, `Unsupported` says where. An OS number never reaches a caller bare, and nothing returns `false` for "the system said no" |
 | **Asking first** | Every `Change` and `Admin` operation has a `can…` that answers *yes*, *yes with this privilege*, *not here* or *cannot tell*, and a `plan…` that says what it would do and how to put it back — before it does anything |
 | **Portability** | A seam is one module path with one file per port. `tools/check.py` holds both files to the same public surface, keeps `extern "C"` inside `sys/<port>/` and `unsafe` inside `raw/`, and refuses a shared file that imports a module only one port has |
-| **Verification** | What cannot run without a machine is separated from what can: the portable half — parsers, tables, arithmetic, the whole API — is translated to Python and run, 315 checks, over fixed fake machines |
+| **Verification** | What cannot run without a machine is separated from what can: the portable half — parsers, tables, arithmetic, the whole API — is translated to Python and run, 437 checks, over fixed fake machines |
 | **Known limits** | All of them, with what each would take to lift: [`LIMITATIONS.md`](LIMITATIONS.md) |
 
 ## ✨ Highlights
@@ -64,6 +64,11 @@
 - 🔎 **Tables that narrow** — `Net::sockets().listening().ofPid(4120).external()`: each step is a new table of copied rows, so tables never share state and any of them may be kept.
 - 🗺️ **Routing that answers like the system** — `Net::routeTo(addr)` takes the longest prefix and, among equals, the lowest metric. `Net::primary()`, `gateway()`, `localAddress()`, `isOnline()` are built on it.
 - 📈 **Rates, not just counters** — `TrafficMeter` turns two readings into bytes per second, and treats a counter that went *down* as no measurement rather than a gigabyte per second. `CpuMeter` does the same for processor load.
+- 🏷️ **Names, from what the machine asked for** — a reverse record says what an address's *owner* published, which for a content network is a machine number. The resolver's own cache says what a program on this machine *typed*: `Net::dnsCache().nameOf(addr)` is `api.stripe.com`, not `a23-45-67-89.deploy.akamaitechnologies.com`. Nothing is sent to the network to read it.
+- 🌐 **Who announces an address** — `Net::origin(addr)` is two DNS lookups against Team Cymru's zones, no key and no TLS: `AS15133 EDGECAST, US`. `Net::reverse` and `Net::txt` are the lookups under it, read from the DNS message itself by a parser that follows name pointers, refuses a message that points at itself and never reads past its own length.
+- 📡 **A live trace** — `NetTrace::start()` opens an Event Tracing session on the kernel's network provider and the DNS client's: `poll()` takes what has happened since last time and `counters()` answers *bytes sent and received by this process*, the connections that opened and closed between two polls, and the names it resolved. Events collect in a ring while the program does other things; the trace says when it dropped some.
+- 🚦 **A reading says whether it is running** — `ReadingStatus` is `On`, `Off` (with the privilege that would lift it) or `Lost`, with a sentence. A traffic column that is empty because nothing was sent and one that is empty because nothing measures it must not look alike.
+- 🔗 **The join, once** — `Machine` joins what `proc`, `net` and `desk` each read by number: `machine.describe(socket)` is `tcp 10.0.0.2:51000 → api.stripe.com:443 established — chrome.exe [4120]`. Programs are looked up once and remembered by process *identity*, so a reused id is a miss and never the old answer.
 - 📁 **Files, with the parts `std` leaves out** — the volumes and the room left on each, a folder with the kind of every entry, a link *as a link*, a recursive size that never follows one, and a watcher whose queue is first-in first-out and says so when the system dropped events (`WatchState::Lost`) instead of guessing.
 - 🔒 **Privilege is part of the vocabulary** — `Access` is `Read`, `Change` or `Admin`; `Privilege` is `User`, `Elevated` or `System`; the process knows which it holds (the token on Windows, the effective user on Linux) and refuses early, while the system keeps the last word.
 - 🧪 **A checker, because there is no compiler here** — a parser written from the language's documentation, a resolver for names and arities, the layer and port rules, and a self-test that plants 25 faults and fails if any is accepted.
@@ -126,9 +131,10 @@ axle build && ./target/probe
 | `raw` | pointer reads, bounded buffers, UTF-16 and UTF-8, socket addresses | written, not run |
 | `system` | host, memory, uptime, processor load, battery | both ports written, not run |
 | `proc` | the process list and tree, image path, priority, signals | both ports written, not run |
-| `net` | sockets with their owner, interfaces, routes, traffic rates | reading written on both ports, not run. *Changing* the network (routes, DNS) is held back until the reading has met a machine |
-| `fs` | volumes, free space, folder listing, links, read-only, a folder watcher | both ports written, not run |
-| `desk` | notifications, clipboard, hotkeys, windows, the session | planned |
+| `net` | sockets with their owner, interfaces, routes, traffic rates, **the resolver's cache inverted** (address → the name a program asked for), PTR and TXT lookups, **the network that announces an address**, **a live trace** (bytes per process, short connections, resolved names) | reading written on both ports, the polled tables run on Windows; the DNS and trace parts are not run. *Changing* the network (routes, DNS) is held back until the reading has met a machine |
+| `fs` | volumes, free space, folder listing, links, read-only, a folder watcher | both ports written; the Windows ones run |
+| `desk` | **revealing a file in the file manager**; notifications, clipboard, hotkeys, windows, the session next | `reveal` written on both ports, not run |
+| `machine` | **the readings joined**: a socket's process, a process's program (found once, remembered), an address's name | written; tested over fake machines |
 | `diag` | event log, journal, crash reports, counters | planned |
 
 The order, and why, is in [`doc/ROADMAP.md`](doc/ROADMAP.md).
@@ -184,13 +190,13 @@ signatures, so a target with a missing answer fails *here*, not in a build far f
 | `tools/check.py` | every file parses; names, arities, mutability and exhaustiveness resolve; layers never reach upward; `extern "C"` only in ports, `unsafe` only in `raw/`; every port answers a seam alike; a shared file imports only what every port has |
 | `tools/check.py --selftest` | plants 25 faults, one at a time, and fails if the checker accepts any |
 | `tools/gen_lib.py --check` | `src/lib.axle` names every module a build must see |
-| `tools/axpy/` | an Axle → Python translator that runs the portable half — 315 checks over fixed fake machines |
+| `tools/axpy/` | an Axle → Python translator that runs the portable half — 437 checks over fixed fake machines |
 
 ```bash
 python3 tools/check.py
 python3 tools/check.py --selftest
 python3 tools/gen_lib.py --check
-for t in core proc net fs system; do python3 tools/axpy/test_$t.py; done
+for t in core proc net fs system dns desk trace machine; do python3 tools/axpy/test_$t.py; done
 tools/img/render.sh            # the pictures above, from tools/img/*.html
 ```
 

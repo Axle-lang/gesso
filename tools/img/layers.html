@@ -4,6 +4,7 @@
 .layer { border-radius: 18px; padding: 22px 28px; display: grid; grid-template-columns: 210px 1fr; align-items: center; gap: 24px; border: 1px solid; }
 .layer .name { font-size: 26px; font-weight: 700; }
 .layer .note { font-size: 15px; opacity: .75; margin-top: 4px; font-weight: 400; }
+.mach { background: linear-gradient(90deg,#3a2a66,#2a2f6c); border-color: #6a58d6; }
 .api { background: linear-gradient(90deg,#2a2466,#1f2a5c); border-color: #4a41b0; }
 .sys { background: #1b2a2f; border-color: #2f5a63; }
 .raw { background: #2b2420; border-color: #6b4c36; }
@@ -22,13 +23,15 @@
 <h1>Gesso · architecture</h1>
 <h2>A module never reaches <em>upward</em>. The system is touched in <em>one</em> place.</h2>
 <div class="stack">
+  <div class="layer mach"><div><div class="name">machine</div><div class="note">the readings joined</div></div>
+    <div class="mods"><div class="m">Machine<small>socket → process → program → name</small></div><div class="m">describe()<small>one line per socket, named</small></div></div></div>
   <div class="layer api"><div><div class="name">API</div><div class="note">what a program imports</div></div>
     <div class="mods">
       <div class="m">system<small>Host · CpuMeter · Power</small></div>
       <div class="m">proc<small>Procs · ProcTree</small></div>
-      <div class="m">net<small>Net · TrafficMeter</small></div>
+      <div class="m">net<small>Net · DNS · NetTrace</small></div>
       <div class="m">fs<small>Fs · FsWatcher</small></div>
-      <div class="m todo">desk<small>planned</small></div>
+      <div class="m">desk<small>Desk::reveal</small></div>
       <div class="m todo">diag<small>planned</small></div>
     </div></div>
   <div class="layer sys"><div><div class="name">sys</div><div class="note">seams · every <span class="mono">extern "C"</span></div></div>
@@ -41,6 +44,6 @@
   <div class="layer raw"><div><div class="name">raw</div><div class="note">every <span class="mono">unsafe</span></div></div>
     <div class="mods"><div class="m">Raw<small>pointer reads</small></div><div class="m">Buf<small>bounded, freed</small></div><div class="m">Wide · Narrow<small>UTF-16 · UTF-8</small></div></div></div>
   <div class="layer core"><div><div class="name">core</div><div class="note">vocabulary · no OS · fully tested</div></div>
-    <div class="mods"><div class="m">errors<small>Denied · Gone · Absent …</small></div><div class="m">contract<small>Access · Support · Plan</small></div><div class="m">readings<small>Addr · SocketInfo · FileStat</small></div><div class="m">parsers<small>/proc/net · mounts · stat</small></div></div></div>
+    <div class="mods"><div class="m">errors<small>Denied · Gone · Absent …</small></div><div class="m">contract<small>Access · Support · Plan · Reading</small></div><div class="m">readings<small>Addr · SocketInfo · FileStat</small></div><div class="m">parsers<small>/proc/net · mounts · stat</small></div></div></div>
 </div>
-<div class="legend"><div class="k"><b>63</b> source files</div><div class="k"><b>315</b> checks run on the portable half</div><div class="k"><b>25</b> planted faults the checker must reject</div></div>
+<div class="legend"><div class="k"><b>85</b> source files</div><div class="k"><b>437</b> checks run on the portable half</div><div class="k"><b>25</b> planted faults the checker must reject</div></div>

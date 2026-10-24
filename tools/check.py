@@ -9,7 +9,7 @@ failures it reports first are caught here, from the text alone:
 
   imports     every `use crate::a::b::{X}` names a module that exists and declares X
   layers      a module imports from a lower layer, or from its own; the API modules (system, proc,
-              net, fs, desk, diag) share the top rank and never import one another
+              net, fs, desk, diag) share one rank and never import one another; `machine` sits above them
               (doc/ARCHITECTURE.md)
   syntax      the whole tree parses with tools/axparse.py (the grammar of the language's documentation)
   semantics   tools/axcheck.py: names resolve, writes go to `let mut` bindings, members and
@@ -41,7 +41,10 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), 
 
 # Bottom to top. A module's layer is the first path component under src/. The API modules share a
 # rank: each may use everything below it and nothing beside it.
-RANKS = {"core": 0, "raw": 1, "sys": 2, "system": 3, "proc": 3, "net": 3, "fs": 3, "desk": 3, "diag": 3}
+RANKS = {
+    "core": 0, "raw": 1, "sys": 2, "system": 3, "proc": 3, "net": 3, "fs": 3, "desk": 3, "diag": 3,
+    "machine": 4,
+}
 LAYERS = list(RANKS)
 
 # A directory under src/ that carries one port's answer to a seam. `src/sys/win32/os.axle` and

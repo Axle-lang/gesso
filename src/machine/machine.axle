@@ -1,0 +1,191 @@
+// machine — the readings joined: a socket's process, a process's program, an address's name.
+//
+//     let machine : Machine = new Machine();
+//     machine.refresh();
+//     let sockets : SocketTable = machine.sockets().external();
+//     for (i of 0..sockets.size()) {
+//         println(machine.describe(sockets.at(i)));
+//         // tcp 10.0.0.2:51000 → api.stripe.com:443 established — chrome.exe [4120]
+//     }
+//
+// `proc`, `net` and `desk` each read one thing, and each reading names the others only by number: a socket
+// has a process id, a process has an image path, an address has a name somewhere in a resolver's cache.
+// Every program that shows the network ends up joining them, and every one writes the same join: find the
+// process by id, ask for its program once, look the address up. It is here once.
+//
+// A `Machine` is a reading *and* what it remembers between readings: the programs found so far (so a row
+// is not opened again on every repaint) and the resolver's cache (read on a schedule, with a status). The
+// tables are copies and are not live: `refresh` replaces them with newer ones, and anything taken from the
+// old ones stays valid.
+
+use crate::core::clock::{Clock, Span};
+use crate::core::error::{SysError, Absent};
+use crate::core::index::PidIndex;
+use crate::core::netaddr::{Addr, Endpoint};
+use crate::core::netinfo::{SocketInfo, SocketTable};
+use crate::core::process::ProcInfo;
+use crate::core::reading::ReadingStatus;
+use crate::net::net::Net;
+use crate::net::dnsreader::DnsCacheReader;
+use crate::proc::procs::Procs;
+use crate::proc::tree::ProcTree;
+use crate::proc::imagepaths::ImagePathCache;
+
+/** How often the resolver's cache is read again, in milliseconds. */
+const DNS_SWEEP_MS : i64 = 5000;
+
+/** The text for a socket whose process cannot be named. */
+const NOT_VISIBLE : string = "(owner not visible)";
+
+/** The text for a socket whose process is no longer there. */
+const EXITED : string = "(exited)";
+
+/** The processes, the sockets, and what joins them. */
+pub class Machine {
+    infos   : ProcInfo[];
+    shape   : ProcTree;
+    table   : SocketTable;
+    byPid   : PidIndex;
+    paths   : ImagePathCache;
+    dns     : DnsCacheReader;
+    readAt  : i64 = -1;
+
+    /** A machine that has read nothing yet; call `refresh`. */
+    constructor() {
+        self.infos = malloc<ProcInfo>(0 as i64);
+        self.shape = new ProcTree(malloc<ProcInfo>(0 as i64));
+        self.table = new SocketTable();
+        self.byPid = new PidIndex(0);
+        self.paths = new ImagePathCache();
+        self.dns = new DnsCacheReader(DNS_SWEEP_MS);
+    }
+
+    /**
+     * Read the processes and the sockets again, and the resolver's cache if it is due. What is remembered
+     * (programs found, the cache) is kept. The processes are read first, so a socket's owner is at least as
+     * old as the socket.
+     */
+    pub fn refresh(mut self) : void ! SysError {
+        let procs : ProcInfo[] = Procs::list();
+        let sockets : SocketTable = Net::sockets();
+        self.shape = new ProcTree(procs);
+        self.infos = procs;
+        self.table = sockets;
+        self.byPid = new PidIndex(procs.length as i32);
+        for (i of 0..procs.length) {
+            self.byPid.put(procs[i].pid, i as i32);
+        }
+        self.readAt = Clock::mono();
+        let nowMs : i64 = Span::toMillis(self.readAt);
+        if (self.dns.due(nowMs)) {
+            self.dns.sweep(nowMs);
+        }
+    }
+
+    /** Whether `refresh` has run. */
+    pub fn hasRead(self) : bool {
+        return self.readAt >= 0;
+    }
+
+    /** The processes, as the tree they are. */
+    pub fn processes(self) : ProcTree {
+        return self.shape;
+    }
+
+    /** Every socket. */
+    pub fn sockets(self) : SocketTable {
+        return self.table;
+    }
+
+    /** The process `pid`, or `Absent` when it is not in the last reading (it exited, or began since). */
+    pub fn process(self, pid : i64) : ProcInfo ! SysError {
+        let at : i32 = self.byPid.get(pid);
+        if (at < 0) {
+            throw Absent("machine.process", "process " + pid.toString());
+        }
+        return self.infos[at as i64].copy();
+    }
+
+    /** The process that owns `socket`; `Absent` when the owner cannot be seen or has gone. */
+    pub fn processOf(self, socket : SocketInfo) : ProcInfo ! SysError {
+        if (!socket.hasOwner()) {
+            throw Absent("machine.processOf", "visible owner for " + socket.local.text());
+        }
+        return self.process(socket.pid);
+    }
+
+    /** The name of the process that owns `socket`, or a phrase that says why there is none. */
+    pub fn ownerName(self, socket : SocketInfo) : string {
+        if (!socket.hasOwner()) {
+            return NOT_VISIBLE;
+        }
+        let at : i32 = self.byPid.get(socket.pid);
+        return at < 0 ? EXITED : self.infos[at as i64].name;
+    }
+
+    /** The sockets a process owns. */
+    pub fn socketsOf(self, process : ProcInfo) : SocketTable {
+        return self.table.ofPid(process.pid);
+    }
+
+    /** The path of the program `process` runs, found once and remembered; empty when it cannot be read. */
+    pub fn programOf(mut self, process : ProcInfo) : string {
+        return self.paths.pathOf(process);
+    }
+
+    /** Why the program of `process` could not be found; empty when it was. */
+    pub fn whyNoProgram(mut self, process : ProcInfo) : string {
+        return self.paths.why(process);
+    }
+
+    /**
+     * The path of the program that owns `socket`, or an empty string when the owner or its program is not
+     * known.
+     */
+    pub fn programOfSocket(mut self, socket : SocketInfo) : string {
+        let at : i32 = socket.hasOwner() ? self.byPid.get(socket.pid) : -1;
+        return at < 0 ? "" : self.paths.pathOf(self.infos[at as i64]);
+    }
+
+    /**
+     * The name a program on this machine asked for to reach `addr`, from the resolver's cache; empty when
+     * none.
+     */
+    pub fn nameOf(self, addr : Addr) : string {
+        return self.dns.nameOf(addr);
+    }
+
+    /** `endpoint` as text, with its address as a name when the cache has one: "api.stripe.com:443". */
+    pub fn endpointText(self, endpoint : Endpoint) : string {
+        let name : string = self.dns.nameOf(endpoint.addr);
+        if (name.byteLength == 0) {
+            return endpoint.text();
+        }
+        return endpoint.port == 0 ? name : name + ":" + endpoint.port.toString();
+    }
+
+    /** One line about `socket`: "tcp 10.0.0.2:51000 → api.stripe.com:443 established — chrome.exe [4120]". */
+    pub fn describe(self, socket : SocketInfo) : string {
+        let mut s : string = socket.proto.label() + " " + socket.local.text();
+        if (!socket.remote.isEmpty()) {
+            s = s + " → " + self.endpointText(socket.remote);
+        }
+        s = s + " " + socket.state.label() + " — " + self.ownerName(socket);
+        if (socket.hasOwner()) {
+            s = s + " [" + socket.pid.toString() + "]";
+        }
+        return s;
+    }
+
+    /**
+     * What each source is doing: the polled tables are on once read, the resolver's cache says for itself.
+     */
+    pub fn readings(self) : ReadingStatus[] {
+        let mut out : ReadingStatus[] = malloc<ReadingStatus>(2 as i64);
+        out[0 as i64] = self.hasRead()
+            ? ReadingStatus::on("connection tables", "the processes and sockets as of the last refresh")
+            : ReadingStatus::off("connection tables", "not read yet");
+        out[1 as i64] = self.dns.status();
+        return out;
+    }
+}

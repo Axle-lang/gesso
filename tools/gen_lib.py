@@ -13,7 +13,7 @@ import sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 SRC = os.path.join(ROOT, "src")
-LAYERS = ["core", "raw", "sys", "system", "proc", "net", "fs", "desk", "diag"]
+LAYERS = ["core", "raw", "sys", "system", "proc", "net", "fs", "desk", "diag", "machine"]
 PORTS = ("win32", "linux")
 
 HEADER = """// gesso — what an operating system exposes, as one library for Axle.
@@ -35,6 +35,7 @@ HEADER = """// gesso — what an operating system exposes, as one library for Ax
 //   fs       watchers, volumes, permissions, links, atomic operations
 //   desk     notifications, clipboard, hotkeys, windows, the session
 //   diag     logs, events, crash reports, counters
+//   machine  the readings joined: a socket's process, a process's program, an address's name
 """
 
 
