@@ -76,6 +76,17 @@ pub class Values<T> {
         self.items = malloc<T>(self.room as i64);
     }
 
+    /**
+     * A sequence with room for `room` items, for a caller that knows how many
+     * there will be. Prefer this for `string`: growing a `Values<string>`
+     * reallocates an array of strings, and the old array's elements are
+     * released after being moved (see LIMITATIONS.md).
+     */
+    constructor(room : i32) {
+        self.room = room < 1 ? 1 : room;
+        self.items = malloc<T>(self.room as i64);
+    }
+
     /** Put `v` at the end. */
     pub fn add(mut self, own v : T) : void {
         if (self.used == self.room) {

@@ -84,7 +84,7 @@ pub class Procs {
      * refused process does not stop the others. For a list shown again and again, keep an `ImagePathCache`.
      */
     pub static fn imagePaths(pids : i64[]) : ImagePaths {
-        let out : ImagePaths = new ImagePaths();
+        let out : ImagePaths = new ImagePaths(pids.length as i32);
         for (i of 0..pids.length) {
             let pid : i64 = pids[i as i64];
             try {

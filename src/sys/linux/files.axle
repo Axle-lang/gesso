@@ -9,7 +9,7 @@ use crate::core::error::SysError;
 use crate::core::list::Values;
 use crate::sys::errno::Errno;
 use crate::sys::libc::{
-    open, read, close, opendir, readdir, closedir, readlink, errnoLocation, O_RDONLY, DIRENT_NAME,
+    open, read, close, opendir, readdir, rewinddir, closedir, readlink, errnoLocation, O_RDONLY, DIRENT_NAME,
 };
 use crate::raw::mem::Raw;
 use crate::raw::buf::Buf;
@@ -79,8 +79,21 @@ pub class Files {
         if (Raw::isNil(dir)) {
             Errno::posix(op, path, Files::errno());
         }
-        let found : Values<string> = new Values<string>();
+        // Count first, then fill: a `Values` that has to grow reallocates an
+        // array of strings, and the old array's elements are released after
+        // being moved (LIMITATIONS.md).
+        let mut count : i32 = 0;
         let mut entry : ptr = readdir(dir);
+        while (!Raw::isNil(entry)) {
+            let entryName : string = Narrow::read(Raw::plus(entry, DIRENT_NAME), 256);
+            if (entryName != "." && entryName != "..") {
+                count = count + 1;
+            }
+            entry = readdir(dir);
+        }
+        rewinddir(dir);
+        let found : Values<string> = new Values<string>(count);
+        entry = readdir(dir);
         while (!Raw::isNil(entry)) {
             let entryName : string = Narrow::read(Raw::plus(entry, DIRENT_NAME), 256);
             if (entryName != "." && entryName != "..") {

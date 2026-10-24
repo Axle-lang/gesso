@@ -33,6 +33,13 @@ pub class ImagePaths {
         self.why = new Values<string>();
     }
 
+    /** A result with room for `room` ids, for a caller that knows how many it will ask about. */
+    constructor(room : i32) {
+        self.pids = new Values<i64>(room);
+        self.paths = new Values<string>(room);
+        self.why = new Values<string>(room);
+    }
+
     /** Record that process `pid` runs the program at `path`. */
     pub fn found(mut self, own pid : i64, own path : string) : void {
         self.pids.add(pid);
@@ -103,13 +110,17 @@ pub class ImagePathCache {
     reasons : Values<string>;
     room    : i32;
 
-    /** An empty cache. */
+    /**
+     * An empty cache. The room is also the ceiling this cache is built with:
+     * `Values<string>` cannot grow safely yet, so it is sized up front, and a
+     * machine with more processes than this asks for a larger constant.
+     */
     constructor() {
-        self.room = 256;
+        self.room = 4096;
         self.index = new PidIndex(self.room);
-        self.keys = new Values<i64>();
-        self.paths = new Values<string>();
-        self.reasons = new Values<string>();
+        self.keys = new Values<i64>(self.room);
+        self.paths = new Values<string>(self.room);
+        self.reasons = new Values<string>(self.room);
     }
 
     /** How many processes are remembered. */
@@ -182,10 +193,10 @@ pub class ImagePathCache {
 
     /** Forget everything, so that the next question asks the system again (after elevating, say). */
     pub fn clear(mut self) : void {
-        self.room = 256;
+        self.room = 4096;
         self.index = new PidIndex(self.room);
-        self.keys = new Values<i64>();
-        self.paths = new Values<string>();
-        self.reasons = new Values<string>();
+        self.keys = new Values<i64>(self.room);
+        self.paths = new Values<string>(self.room);
+        self.reasons = new Values<string>(self.room);
     }
 }

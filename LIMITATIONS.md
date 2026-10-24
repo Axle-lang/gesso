@@ -127,4 +127,9 @@ What stands in for the compiler on the rest is in `tools/`, and each claim below
   need nothing and go in a `Values`.
 - **A lambda cannot capture an object** (E0731), only numbers and the like; the filters of `SocketTable`
   capture the number behind an enum, and `peerIs` is a loop for that reason.
+- **A `Values<string>` grown in place is unsafe.** `Values.add` doubles the array by moving each string into a
+  bigger one; the old array then releases the strings it appears to still own, and the heap is corrupted (the
+  Linux `/proc` listing crashed on the first real run because of it). The library pre-sizes every string-valued
+  `Values` — a folder's names, image paths and their reasons — and grows only the numeric ones. Fixing this at
+  the language level is the real answer; until then a caller appending strings must size the sequence up front.
 - **The compiler does not build a library by itself** and does not check a name against its imports.

@@ -29,6 +29,9 @@ extern "C" from "c" {
     /** `struct dirent *readdir(DIR *)` — null at the end; the record is valid until the next call. */
     fn readdir(dir : ptr) : ptr;
 
+    /** `void rewinddir(DIR *)`. */
+    fn rewinddir(dir : ptr) : void;
+
     /** `int closedir(DIR *)`. */
     fn closedir(dir : ptr) : i32;
 
