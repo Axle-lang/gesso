@@ -1,0 +1,34 @@
+<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="base.css">
+<style>
+.cols { display: grid; grid-template-columns: repeat(3, 1fr); gap: 22px; }
+.col { padding: 28px 28px 24px; }
+.col .t { display:flex; align-items:center; gap:14px; margin-bottom: 6px; }
+.col .t b { font-size: 30px; }
+.col p { color:#b9b6d6; font-size: 18px; line-height: 1.5; margin: 10px 0 18px; min-height: 54px; }
+.snip { background:#12121c; border:1px solid #2c2c44; border-radius:12px; padding: 14px 16px; font-size: 16px; line-height: 1.55; margin-top: 12px; color:#d8d5ee; }
+.snip .c { color:#7f7ba8 } .snip .r { color:#ff9d7a } .snip .g { color:#7fd6a0 } .snip .b { color:#9db8ff }
+.read .chip { background:#1c3b2a; color:#7fd6a0 } .change .chip { background:#3b3418; color:#f0c95a } .admin .chip { background:#3d1f26; color:#ff8a9a }
+.row2 { display:grid; grid-template-columns: 1fr 1fr; gap:22px; margin-top: 22px; }
+.row2 .card { padding: 24px 28px; } .row2 h3 { font-size: 22px; margin-bottom: 8px; }
+.row2 p { color:#b9b6d6; font-size:17px; line-height:1.5 }
+</style>
+<h1>Gesso · the contract</h1>
+<h2>Every operation says what it does. A refusal <em>names</em> itself.</h2>
+<div class="cols">
+ <div class="card col read"><div class="t"><span class="chip">Read</span><b>only looks</b></div>
+  <p>Needs nothing. Lists, finds, measures. A reading is a copy; it never changes afterwards.</p>
+  <div class="snip mono"><span class="b">Net::sockets()</span>.listening().ofPid(4120)<br><span class="c">// tcp 0.0.0.0:443 listening (pid 4120)</span></div>
+  <div class="snip mono"><span class="b">Net::routeTo</span>(Addr::parse("8.8.8.8"))<br><span class="c">// default via 192.168.1.1 dev Ethernet metric 100</span></div></div>
+ <div class="card col change"><div class="t"><span class="chip">Change</span><b>your own things</b></div>
+  <p>What an ordinary user may do to their own process or files. The system still has the last word.</p>
+  <div class="snip mono"><span class="b">Procs::setPriority</span>(pid, Priority::Idle)<br><span class="b">Fs::setReadOnly</span>(path, true)</div>
+  <div class="snip mono"><span class="b">Fs::canMakeLink()</span>.explain()<br><span class="c">// cannot tell without trying: the folder's permissions decide</span></div></div>
+ <div class="card col admin"><div class="t"><span class="chip">Admin</span><b>the machine</b></div>
+  <p>Needs an elevated session. Asked beforehand, answered with the privilege and the reason.</p>
+  <div class="snip mono"><span class="b">Procs::canSetPriority</span>(Priority::Realtime).explain()<br><span class="r">// needs an elevated administrator: real time can starve the system's own work</span></div>
+  <div class="snip mono"><span class="b">Procs::planSetPriority</span>(21, Priority::Realtime)<br><span class="c">// 1. [<span class="r">admin</span>] set the priority of process 21 to real time<br>//    (undo: set it back to high)</span></div></div>
+</div>
+<div class="row2">
+ <div class="card"><h3>…and when the system says no</h3><div class="snip mono"><span class="r">proc.setPriority: denied on process 4120 to real time: needs an elevated administrator</span><br><span class="r">proc.imagePath: process 4120 no longer exists</span><br><span class="r">net.routeTo: no route to 2001:db8::1</span><br><span class="r">proc.signal: interrupt is not available on windows</span></div></div>
+ <div class="card"><h3>Eight reasons, never <span class="mono">false</span></h3><p><b>Denied</b> · <b>Unsupported</b> · <b>Gone</b> · <b>Absent</b> · <b>Busy</b> · <b>Invalid</b> · <b>Expired</b> · <b>OsFailure</b> — all a <span class="mono">SysError</span>, which is an <span class="mono">IOException</span>: a caller that already declares one carries them onward. An operating system's number never reaches a caller bare.</p></div>
+</div>

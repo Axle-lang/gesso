@@ -1,0 +1,38 @@
+<!doctype html><meta charset="utf-8">
+<style>
+* { box-sizing: border-box; margin: 0; }
+html, body { width: 1280px; height: 640px; overflow: hidden; }
+body { background: #12121c; color: #e8e6f2; font-family: "Inter", "Segoe UI", "DejaVu Sans", system-ui, sans-serif; position: relative; }
+.glow { position: absolute; width: 900px; height: 900px; right: -300px; top: -380px; background: radial-gradient(closest-side, rgba(110,94,255,.38), rgba(110,94,255,0)); }
+.glow2 { position: absolute; width: 700px; height: 700px; left: -300px; bottom: -420px; background: radial-gradient(closest-side, rgba(255,122,69,.18), rgba(255,122,69,0)); }
+.left { position: absolute; left: 80px; top: 84px; width: 640px; }
+.eyebrow { font-size: 20px; letter-spacing: .22em; text-transform: uppercase; color: #9a96c4; font-weight: 600; }
+h1 { font-size: 148px; line-height: 1.18; padding-bottom: 6px; letter-spacing: -.04em; font-weight: 800; margin: 10px 0 8px -6px; background: linear-gradient(90deg,#fff 20%,#a79fff); -webkit-background-clip: text; color: transparent; }
+.tag { font-size: 31px; line-height: 1.32; color: #cfcce8; font-weight: 500; }
+.tag b { color: #fff; font-weight: 700; }
+.chips { position: absolute; left: 80px; bottom: 78px; display: flex; gap: 12px; }
+.chip { padding: 10px 18px; border-radius: 999px; font-size: 20px; font-weight: 600; background: #1b1b2b; border: 1px solid #2c2c44; color: #d8d5ee; }
+.chip.w { background: #5B4BE1; border-color: #5B4BE1; color: #fff; }
+.stack { position: absolute; right: 70px; top: 96px; width: 440px; display: grid; gap: 14px; }
+.l { height: 92px; border-radius: 18px; border: 1px solid; padding: 0 26px; display: flex; align-items: center; justify-content: space-between; font-size: 26px; font-weight: 700; }
+.l small { font-size: 15px; font-weight: 500; opacity: .7; font-family: "DejaVu Sans Mono", monospace; }
+.a { background: linear-gradient(90deg,#2a2466,#1f2a5c); border-color: #4a41b0; margin-left: 0; }
+.s { background: #1b2a2f; border-color: #2f5a63; margin-left: 22px; }
+.r { background: #2b2420; border-color: #6b4c36; margin-left: 44px; }
+.c { background: #22202e; border-color: #4a4668; margin-left: 66px; }
+.url { position: absolute; right: 70px; bottom: 80px; font-size: 20px; color: #7f7ba8; font-family: "DejaVu Sans Mono", monospace; }
+</style>
+<div class="glow"></div><div class="glow2"></div>
+<div class="left">
+  <div class="eyebrow">Axle · system library</div>
+  <h1>gesso</h1>
+  <div class="tag">What an operating system exposes — <b>one library</b>, written once. Refusals that name themselves.</div>
+</div>
+<div class="stack">
+  <div class="l a">API <small>system · proc · net · fs</small></div>
+  <div class="l s">sys <small>extern "C" · one file per port</small></div>
+  <div class="l r">raw <small>every unsafe</small></div>
+  <div class="l c">core <small>vocabulary · tested</small></div>
+</div>
+<div class="chips"><span class="chip">Processes</span><span class="chip">Network</span><span class="chip">Files</span><span class="chip">Power</span><span class="chip w">Windows · Linux</span></div>
+<div class="url">github.com/Axle-lang/gesso</div>
