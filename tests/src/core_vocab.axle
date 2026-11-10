@@ -1,0 +1,462 @@
+// core_vocab — checks for the portable vocabulary: privileges, errors, errno, guards, support, plans, keys,
+// time, text, lists and the text scanner.
+//
+// Ported from tools/axpy/test_core.py. The checks that needed a fake host (a fixed hostname, a fixed
+// memory size) have no seam to be substituted in Axle; the real machine is asked for what holds on any
+// machine instead.
+
+use gesso::{
+    Access, Busy, Capability, Clock, Denied, Errno, Expired, Gone, Guard, Host, HostInfo, Invalid,
+    Key, Line, List, MemoryInfo, OsFailure, Plan, PlanStep, Privilege, Scan, Span, Support,
+    SysError, Unsupported, Utf16, Utf8, Values
+};
+
+use crate::checks::Checks;
+
+/** Which reason Windows error `code` becomes, as a word; "none" when nothing was thrown. */
+fn coreWin(code : i32) : string {
+    try {
+        Errno::win32("x", "y", code);
+    } catch e : Denied {
+        return "Denied";
+    } catch e : Unsupported {
+        return "Unsupported";
+    } catch e : Gone {
+        return "Gone";
+    } catch e : Busy {
+        return "Busy";
+    } catch e : Invalid {
+        return "Invalid";
+    } catch e : Expired {
+        return "Expired";
+    } catch e : OsFailure {
+        return "OsFailure";
+    } catch e : SysError {
+        return "SysError";
+    }
+    return "none";
+}
+
+/** Which reason POSIX `errno` `code` becomes, as a word. */
+fn corePosix(code : i32) : string {
+    try {
+        Errno::posix("x", "y", code);
+    } catch e : Denied {
+        return "Denied";
+    } catch e : Unsupported {
+        return "Unsupported";
+    } catch e : Gone {
+        return "Gone";
+    } catch e : Busy {
+        return "Busy";
+    } catch e : Invalid {
+        return "Invalid";
+    } catch e : Expired {
+        return "Expired";
+    } catch e : OsFailure {
+        return "OsFailure";
+    } catch e : SysError {
+        return "SysError";
+    }
+    return "none";
+}
+
+/** The message of the failure Windows error `code` becomes; empty when nothing was thrown. */
+fn coreWinMessage(code : i32) : string {
+    try {
+        Errno::win32("x", "y", code);
+    } catch e : SysError {
+        return e.message;
+    }
+    return "";
+}
+
+/** The message of the failure POSIX `errno` `code` becomes. */
+fn corePosixMessage(code : i32) : string {
+    try {
+        Errno::posix("a", "b", code);
+    } catch e : SysError {
+        return e.message;
+    }
+    return "";
+}
+
+/** The refusal of a guard where `have` stands and `needs` is required (a blank one when it lets through). */
+fn coreRefusal(have : Privilege, needs : Privilege) : Denied {
+    try {
+        Guard::require(have, needs, "proc.setAffinity", "process 4120");
+    } catch e : Denied {
+        return e;
+    }
+    return new Denied("", "", Privilege::User, -1);
+}
+
+/** Whether `Host::require` refuses for `needs`. */
+fn coreHostRefuses(needs : Privilege) : bool {
+    try {
+        Host::require(needs, "proc.kill", "process 4");
+    } catch e : Denied {
+        return true;
+    }
+    return false;
+}
+
+/** Whether `Guard::require` refuses for `have` and `needs`. */
+fn coreGuardRefuses(have : Privilege, needs : Privilege) : bool {
+    try {
+        Guard::require(have, needs, "x", "y");
+    } catch e : Denied {
+        return true;
+    }
+    return false;
+}
+
+/** The checks of the core vocabulary. */
+pub class CoreSuite {
+    /** Runs every check of the suite. */
+    pub static fn run(c : Checks) : void {
+        CoreSuite::privilege(c);
+        CoreSuite::errors(c);
+        CoreSuite::errno(c);
+        CoreSuite::guard(c);
+        CoreSuite::support(c);
+        CoreSuite::plan(c);
+        CoreSuite::keys(c);
+        CoreSuite::time(c);
+        CoreSuite::text(c);
+        try {
+            CoreSuite::hostChecks(c);
+        } catch e : SysError {
+            c.that("host: the readings answer (${e.message})", false);
+        }
+        CoreSuite::lists(c);
+        CoreSuite::scan(c);
+    }
+
+    static fn privilege(c : Checks) : void {
+        let u : Privilege = Privilege::User;
+        let e : Privilege = Privilege::Elevated;
+        let s : Privilege = Privilege::System;
+        c.that("privilege: elevated covers a user's operation", e.covers(u));
+        c.that("privilege: system covers elevated", s.covers(e));
+        c.that("privilege: a user does not cover elevated", !u.covers(e));
+        c.that("access: admin needs an elevated session", Access::Admin.needs() == e);
+        c.that("access: read needs a user", Access::Read.needs() == u);
+        c.that("access: change needs a user", Access::Change.needs() == u);
+        c.sameText("access: label of admin", Access::Admin.label(), "admin");
+        c.that(
+            "privilege: elevated label says administrator",
+            Scan::has(e.label(), "administrator")
+        );
+    }
+
+    static fn errors(c : Checks) : void {
+        let e : Privilege = Privilege::Elevated;
+        let d : Denied = new Denied("net.addRoute", "10.0.0.0/8", e, 5);
+        c.that("denied: names the operation", Scan::has(d.message, "net.addRoute"));
+        c.that("denied: names the object", Scan::has(d.message, "10.0.0.0/8"));
+        c.that("denied: names the privilege", Scan::has(d.message, "administrator"));
+        c.that("denied: keeps the privilege needed", d.needs == e);
+        c.sameInt("denied: keeps the code", d.code as i64, 5);
+        c.sameText("denied: keeps what", d.what, "10.0.0.0/8");
+        c.sameText("denied: keeps the operation", d.op, "net.addRoute");
+        let mut io : string = "none";
+        try {
+            throw Denied("a", "b", e, 1);
+        } catch x : IOException {
+            io = "IOException";
+        }
+        c.sameText("denied: is an IOException", io, "IOException");
+        let mut sys : string = "none";
+        try {
+            throw Denied("a", "b", e, 1);
+        } catch x : SysError {
+            sys = "SysError";
+        }
+        c.sameText("denied: is a SysError", sys, "SysError");
+        let un : Unsupported = new Unsupported("fs.acl", "linux", "ACLs");
+        c.that("unsupported: says where", Scan::has(un.message, "linux"));
+        c.that("gone: says what", Scan::has(new Gone("proc.read", "process 4120").message, "4120"));
+        c.that(
+            "busy: says it is in use",
+            Scan::has(new Busy("fs.lock", "a.txt").message, "in use")
+        );
+        c.that("expired: says how long", Scan::has(new Expired("net.ping", 250).message, "250"));
+        c.sameInt("expired: keeps the millis", new Expired("net.ping", 250).millis, 250);
+        let f : OsFailure = new OsFailure("x", 4, "EINTR");
+        c.that("osfailure: carries the code", Scan::has(f.message, "4"));
+        c.that("osfailure: carries the name", Scan::has(f.message, "EINTR"));
+        c.sameInt("osfailure: keeps the code", f.code as i64, 4);
+    }
+
+    static fn errno(c : Checks) : void {
+        c.sameText("errno: win32 access denied is Denied", coreWin(5), "Denied");
+        c.sameText("errno: win32 privilege not held is Denied", coreWin(1314), "Denied");
+        c.sameText("errno: win32 file not found is Gone", coreWin(2), "Gone");
+        c.sameText("errno: win32 sharing violation is Busy", coreWin(32), "Busy");
+        c.sameText("errno: win32 invalid parameter is Invalid", coreWin(87), "Invalid");
+        c.sameText("errno: win32 timeout is Expired", coreWin(1460), "Expired");
+        c.sameText("errno: win32 not supported is Unsupported", coreWin(50), "Unsupported");
+        c.sameText("errno: unknown win32 code is OsFailure", coreWin(997), "OsFailure");
+        c.that(
+            "errno: unknown win32 code keeps its name",
+            Scan::has(coreWinMessage(997), "IO_PENDING")
+        );
+        c.sameText("errno: EPERM is Denied", corePosix(1), "Denied");
+        c.sameText("errno: ESRCH is Gone", corePosix(3), "Gone");
+        c.sameText("errno: EBUSY is Busy", corePosix(16), "Busy");
+        c.sameText("errno: EINVAL is Invalid", corePosix(22), "Invalid");
+        c.sameText("errno: ETIMEDOUT is Expired", corePosix(110), "Expired");
+        c.sameText("errno: ENOSYS is Unsupported", corePosix(38), "Unsupported");
+        c.that("errno: ENOSYS says linux", Scan::has(corePosixMessage(38), "linux"));
+        c.that(
+            "errno: ECONNREFUSED keeps its name",
+            Scan::has(corePosixMessage(111), "ECONNREFUSED")
+        );
+        c.sameText("errno: win32 names a known code", Errno::win32Name(997), "ERROR_IO_PENDING");
+        c.sameText("errno: win32 leaves an unknown code unnamed", Errno::win32Name(31337), "");
+        c.sameText("errno: posix names a known code", Errno::posixName(4), "EINTR");
+    }
+
+    static fn guard(c : Checks) : void {
+        let u : Privilege = Privilege::User;
+        let e : Privilege = Privilege::Elevated;
+        c.that("guard: lets an enough privilege through", !coreGuardRefuses(e, e));
+        c.that("guard: refuses an ordinary user", coreGuardRefuses(u, e));
+        let d : Denied = coreRefusal(u, e);
+        c.that("guard: names what was needed", d.needs == e);
+        c.that("guard: names the object", Scan::has(d.message, "process 4120"));
+        c.sameText("guard: names the operation", d.op, "proc.setAffinity");
+    }
+
+    static fn support(c : Checks) : void {
+        let u : Privilege = Privilege::User;
+        let e : Privilege = Privilege::Elevated;
+        let s : Privilege = Privilege::System;
+        c.that("support: yes is usable by anyone", Support::yes().usableBy(u));
+        let w : Support = Support::withPrivilege(e, "changes the routing table");
+        c.that("support: a privileged operation is not usable by a user", !w.usableBy(u));
+        c.that("support: a privileged operation is usable with it", w.usableBy(e));
+        c.that("support: a privileged operation is usable above it", w.usableBy(s));
+        c.that(
+            "support: unsupported is never usable",
+            !Support::unsupported("no such thing").usableBy(s)
+        );
+        c.that(
+            "support: unknown says try it",
+            Support::unknown("depends on the process").usableBy(u)
+        );
+        c.that("support: explain gives the reason", Scan::has(w.explain(), "routing table"));
+        c.that("support: explain starts with needs", Scan::startsAt(w.explain(), 0, "needs "));
+        c.sameText("support: yes explains as yes", Support::yes().explain(), "yes");
+        let cap : Capability = Capability {
+            module: "net",
+            name: "addRoute",
+            access: Access::Admin,
+        };
+        c.sameText("support: a capability is spelled module.name", cap.label(), "net.addRoute");
+    }
+
+    static fn plan(c : Checks) : void {
+        let plan : Plan = new Plan("proc.setPriority");
+        plan.add(new PlanStep(
+            "set the priority of process 4120 to below normal",
+            Access::Change,
+            "set it back to normal"
+        ));
+        plan.note(Access::Admin, "raise the priority class of process 4 to real time");
+        c.sameInt("plan: counts its steps", plan.count() as i64, 2);
+        c.that("plan: weight is its heaviest step", plan.highest() == Access::Admin);
+        c.that(
+            "plan: an admin step needs an elevated session",
+            plan.needs() == Privilege::Elevated
+        );
+        c.that("plan: a step that cannot be undone makes it irreversible", !plan.reversible());
+        let text : string = plan.describe();
+        c.that(
+            "plan: describe starts with the title",
+            Scan::startsAt(text, 0, "proc.setPriority:")
+        );
+        c.that("plan: describe numbers the first step", Scan::has(text, "1. [change]"));
+        c.that("plan: describe numbers the second step", Scan::has(text, "2. [admin]"));
+        c.that("plan: describe says how to undo", Scan::has(text, "undo: set it back"));
+        c.that("plan: access of a step", plan.accessAt(0) == Access::Change);
+        c.sameText("plan: undo of a step", plan.undoAt(0), "set it back to normal");
+        let big : Plan = new Plan("many");
+        for (i of 0..40) {
+            big.note(Access::Read, "step ${i}");
+        }
+        c.sameInt("plan: grows past its first room", big.count() as i64, 40);
+        c.sameText("plan: keeps the last step", big.whatAt(39), "step 39");
+        c.that("plan: a read-only plan is reversible", big.reversible());
+        c.that("plan: a read-only plan needs nothing", big.needs() == Privilege::User);
+    }
+
+    static fn keys(c : Checks) : void {
+        c.that("key: of a text is never negative", Key::ofText("chrome.exe") >= 0);
+        c.that("key: of a pair is never negative", Key::pair(1, 2) >= 0);
+        c.that("key: the same text is the same key", Key::ofText("a") == Key::ofText("a"));
+        c.that("key: another text is another key", Key::ofText("a") != Key::ofText("b"));
+        c.that("key: scoping separates kinds", Key::scoped("pid", 4) != Key::scoped("port", 4));
+        c.that("key: order matters in a pair", Key::pair(1, 2) != Key::pair(2, 1));
+        c.that(
+            "key: a process id and a name make a key",
+            Key::named(4120, "chrome.exe") != Key::named(4121, "chrome.exe")
+        );
+        c.that("key: none is never a key", Key::ofText("") != Key::NONE);
+    }
+
+    static fn time(c : Checks) : void {
+        let a : i64 = Clock::mono();
+        let b : i64 = Clock::mono();
+        c.that("clock: the monotonic clock only goes forward", a <= b);
+        c.sameInt("span: seconds", Span::seconds(2), 2000000000);
+        c.sameInt("span: millis", Span::millis(5), 5000000);
+        c.sameInt("span: minutes to millis", Span::toMillis(Span::minutes(1)), 60000);
+        c.sameText("span: 850 ms", Span::human(Span::millis(850)), "850 ms");
+        c.sameText("span: 8 s", Span::human(Span::seconds(8)), "8 s");
+        c.sameText("span: 3 min", Span::human(Span::minutes(3)), "3 min");
+        c.sameText("span: 2 h", Span::human(Span::minutes(120)), "2 h");
+        c.sameText("span: 5 d", Span::human(Span::minutes(60 * 24 * 5)), "5 d");
+        c.sameInt("span: an age is never negative", Span::age(5, 9), 0);
+        c.sameInt("span: an age counts back", Span::age(9, 5), 4);
+    }
+
+    /** One round trip: `s` takes `want` UTF-16 units and decodes back to itself. */
+    static fn roundTrip(c : Checks, s : string, want : i32) : void {
+        let units : i32[] = Utf16::encode(s);
+        let n : i32 = Utf16::length(s);
+        c.sameInt("utf16: units of \"${s}\"", n as i64, want as i64);
+        c.sameText("utf16: round-trips \"${s}\"", Utf16::decode(units, n), s);
+    }
+
+    static fn text(c : Checks) : void {
+        CoreSuite::roundTrip(c, "", 0);
+        CoreSuite::roundTrip(c, "svchost.exe", 11);
+        CoreSuite::roundTrip(c, "naïve café", 10);
+        CoreSuite::roundTrip(c, "日本語", 3);
+        CoreSuite::roundTrip(c, "emoji 😀 here", 13);
+        CoreSuite::roundTrip(c, "aé🚀z", 5);
+        let lone : i32[] = [55296, 65];
+        let got : string = Utf16::decode(lone, 2);
+        c.sameInt(
+            "utf16: a lone surrogate becomes U+FFFD (3 bytes) then the next unit",
+            got.byteLength,
+            4
+        );
+        c.sameInt("utf16: U+FFFD leads with 0xEF", got.byteAt(0) as i64, 239);
+        c.sameInt("utf16: the unit after a lone surrogate survives", got.byteAt(3) as i64, 65);
+        c.sameInt("utf8: codepoints are counted, not bytes", Utf8::count("aé😀") as i64, 3);
+    }
+
+    static fn hostChecks(c : Checks) : void ! SysError {
+        let info : HostInfo = Host::info();
+        c.that("host: reports an os", info.os.byteLength > 0);
+        c.that("host: reports an architecture", info.arch.byteLength > 0);
+        c.that("host: reports at least one cpu", info.cpus >= 1);
+        c.that("host: knows its own process id", info.pid > 0);
+        c.that("host: info and privilege agree", info.privilege == Host::privilege());
+        let mem : MemoryInfo = Host::memory();
+        c.that("host: memory total is positive", mem.total > 0);
+        c.that(
+            "host: memory used is total less available",
+            mem.used() == mem.total - mem.available
+        );
+        c.that(
+            "host: memory load is within 0..1000",
+            mem.loadTenths() >= 0 && mem.loadTenths() <= 1000
+        );
+        c.that("host: uptime is positive", Host::uptimeMillis() > 0);
+        c.that(
+            "host: require lets an ordinary operation through",
+            !coreHostRefuses(Privilege::User)
+        );
+        c.that(
+            "host: require refuses exactly what the process does not hold",
+            coreHostRefuses(Privilege::Elevated) == !Host::privilege().covers(Privilege::Elevated)
+        );
+    }
+
+    static fn lists(c : Checks) : void {
+        let vals : Values<i64> = new Values<i64>();
+        for (i of 0..40) {
+            vals.add((i * 2) as i64);
+        }
+        c.sameInt("values: grow to 40", vals.size() as i64, 40);
+        c.sameInt("values: first", vals.at(0), 0);
+        c.sameInt("values: last", vals.at(39), 78);
+        let arr : i64[] = vals.toArray();
+        let mut same : bool = arr.length == 40;
+        for (i of 0..40) {
+            if (arr[i as i64] != (i * 2) as i64) {
+                same = false;
+            }
+        }
+        c.that("values: the array keeps the order", same);
+
+        let lst : List<PlanStep> = new List<PlanStep>();
+        for (i of 0..40) {
+            lst.add(new PlanStep("step ${i}", Access::Read, ""));
+        }
+        lst.set(3, new PlanStep("changed", Access::Read, ""));
+        c.sameInt("list: grows by copying", lst.size() as i64, 40);
+        c.sameText("list: keeps the first", lst.at(0).what, "step 0");
+        c.sameText("list: keeps the last", lst.at(39).what, "step 39");
+        c.sameText("list: sets in place", lst.at(3).what, "changed");
+        let copies : PlanStep[] = lst.toArray();
+        c.sameInt("list: its array has every row", copies.length as i64, 40);
+        c.sameText("list: the array holds the rows' content", copies[5].what, "step 5");
+    }
+
+    static fn scan(c : Checks) : void {
+        let txt : string = "cpu  1 2 3\nbtime 99\n  spaced\tfields  7  \n";
+        c.sameInt("scan: eol finds the end of a line", Scan::eol(txt, 0), 10);
+        c.sameInt("scan: eol of a text without newline", Scan::eol("abc", 0), 3);
+        c.sameInt("scan: eol at the end", Scan::eol("abc\n", 4), 4);
+        let row : Line = Line::at(txt, 0);
+        c.sameInt("line: knows where it ends", row.end, 10);
+        c.sameInt("line: knows where the next starts", row.next(), 11);
+        c.sameText("line: field 1", row.field(1).text(), "1");
+        c.sameText("line: field 0", row.field(0).text(), "cpu");
+        c.that("line: a field past the end is absent", !row.field(9).present());
+        c.sameText("line: an absent field is empty", row.field(9).text(), "");
+        c.sameInt("field: reads as a number", row.field(2).dec(), 2);
+        c.sameInt("field: a word is not a number", row.field(0).dec(), -1);
+        c.sameInt("field: an absent one is not a number", row.field(9).dec(), -1);
+        c.sameInt("field: reads hex", Line::at("ff 10", 0).field(0).hex(), 255);
+        c.sameText(
+            "line: tabs and runs of blanks separate",
+            Line::at(txt, 20).field(1).text(),
+            "fields"
+        );
+        c.sameInt("line: a number after blanks", Line::at(txt, 20).field(2).dec(), 7);
+        c.that("field: equals its word", row.field(0).equals("cpu"));
+        c.that("field: not equal to a prefix", !row.field(0).equals("cp"));
+        c.sameInt("field: size", row.field(0).size(), 3);
+        c.sameInt("field: last byte", row.field(3).lastByte() as i64, 51);
+        c.sameInt("dec: negative", Scan::dec("-42", 0, 3), -42);
+        c.sameInt("dec: refuses a letter", Scan::dec("4x", 0, 2), -1);
+        c.sameInt("dec: refuses a lone minus", Scan::dec("-", 0, 1), -1);
+        c.sameInt("dec: refuses nothing", Scan::dec("", 0, 0), -1);
+        c.sameInt("hex: eight digits", Scan::hex("0100007F", 0, 8), 0x0100007F);
+        c.sameInt("hex: refuses a non-digit", Scan::hex("zz", 0, 2), -1);
+        c.sameInt("hex: refuses seventeen digits", Scan::hex("00000000000000001", 0, 17), -1);
+        c.sameInt("number: a short file", Scan::number("1500\n"), 1500);
+        c.sameInt("number: negative", Scan::number("-1\n"), -1);
+        c.sameInt("number: not a number", Scan::number("up\n"), -1);
+        c.sameInt("lineWith: finds a line by its start", Scan::lineWith(txt, "btime "), 11);
+        c.sameInt("lineWith: not by a tail", Scan::lineWith("xbtime 5\n", "btime "), -1);
+        c.sameInt("lineWith: absent", Scan::lineWith(txt, "nope"), -1);
+        let keyed : Line = Line::at(txt, Scan::lineWith(txt, "btime "));
+        c.sameInt("lineWith: a keyed line reads through its fields", keyed.field(1).dec(), 99);
+        c.that("startsAt: at the start", Scan::startsAt("socket:[1]", 0, "socket:"));
+        c.that("startsAt: not past the end", !Scan::startsAt("so", 0, "socket"));
+        c.that("has: inside", Scan::has("a/virtual/b", "/virtual/"));
+        c.that("has: the empty word", Scan::has("abc", ""));
+        c.that("has: not a longer word", !Scan::has("ab", "abc"));
+        c.sameInt("digit: 7", Scan::digit(55) as i64, 7);
+        c.sameInt("digit: f", Scan::digit(102) as i64, 15);
+        c.sameInt("digit: F", Scan::digit(70) as i64, 15);
+        c.sameInt("digit: g", Scan::digit(103) as i64, -1);
+    }
+}

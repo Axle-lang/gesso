@@ -1,0 +1,232 @@
+// scan — reading numbers, fields and lines out of text already in hand.
+//
+//     let row : Line = Line::at(text, 0);
+//     let state : i64 = row.field(3).hex();
+//
+// The kernel's files are columns of text. Every reader of them needs the same few cuts — a line, a
+// blank-separated field, a decimal or hexadecimal number — and they are here once. A cut that finds
+// nothing answers -1 or an empty field, never an exception, because a half-written line is a normal
+// thing to meet in `/proc`.
+
+use crate::core::text::Utf8;
+
+/** One blank-separated field of a line: a span of the text it was cut from. */
+pub struct Field {
+    pub src : string = "";
+    pub lo  : i64 = -1;
+    pub hi  : i64 = -1;
+
+    /** Whether the line has this field at all. */
+    pub fn present(self) : bool {
+        return self.lo >= 0;
+    }
+
+    /** How many bytes it takes; 0 for an absent field. */
+    pub fn size(self) : i64 {
+        return self.present() ? self.hi - self.lo : 0;
+    }
+
+    /** The field as text; empty for an absent field. */
+    pub fn text(self) : string {
+        return self.present() ? Utf8::slice(self.src, self.lo, self.hi) : "";
+    }
+
+    /** Whether the field is exactly `word`. */
+    pub fn equals(self, word : string) : bool {
+        return self.present() && self.text() == word;
+    }
+
+    /** The byte the field ends with, or 0 for an absent field. */
+    pub fn lastByte(self) : i32 {
+        return self.present() ? self.src.byteAt(self.hi - 1) : 0;
+    }
+
+    /** The field read as a decimal number (a leading minus is allowed), or -1. */
+    pub fn dec(self) : i64 {
+        return self.present() ? Scan::dec(self.src, self.lo, self.hi) : -1;
+    }
+
+    /** The field read as a hexadecimal number of up to 16 digits, or -1. */
+    pub fn hex(self) : i64 {
+        return self.present() ? Scan::hex(self.src, self.lo, self.hi) : -1;
+    }
+}
+
+/** One line of a text: the bytes from `start` up to its newline. */
+pub struct Line {
+    pub src   : string = "";
+    pub start : i64 = 0;
+    pub end   : i64 = 0;
+
+    /** The line of `text` that starts at byte `start`. */
+    pub static fn at(text : string, start : i64) : Line {
+        return Line { src: text, start: start, end: Scan::eol(text, start) };
+    }
+
+    /** Where the next line starts. */
+    pub fn next(self) : i64 {
+        return self.end + 1;
+    }
+
+    /** The `n`th (0-based) blank-separated field; absent when the line has fewer. */
+    pub fn field(self, n : i32) : Field {
+        let mut i : i64 = self.start;
+        let mut seen : i32 = 0;
+        while (i < self.end) {
+            while (i < self.end && Scan::isBlank(self.src.byteAt(i))) {
+                i = i + 1;
+            }
+            let first : i64 = i;
+            while (i < self.end && !Scan::isBlank(self.src.byteAt(i))) {
+                i = i + 1;
+            }
+            if (i == first) {
+                return Field { src: self.src };
+            }
+            if (seen == n) {
+                return Field { src: self.src, lo: first, hi: i };
+            }
+            seen = seen + 1;
+        }
+        return Field { src: self.src };
+    }
+}
+
+/** Cutting text into lines, fields and numbers. */
+pub class Scan {
+    /** Whether `c` separates fields: a space or a tab. */
+    pub static fn isBlank(c : i32) : bool {
+        return c == 32 || c == 9;
+    }
+
+    /**
+     * The offset of the newline that ends the line starting at `at`, or the end of `text` when it has none.
+     */
+    pub static fn eol(text : string, at : i64) : i64 {
+        let mut end : i64 = at;
+        while (end < text.byteLength && text.byteAt(end) != 10) {
+            end = end + 1;
+        }
+        return end;
+    }
+
+    /** The offset of the first line of `text` that starts with `key`, or -1. */
+    pub static fn lineWith(text : string, key : string) : i64 {
+        let mut at : i64 = 0;
+        while (at + key.byteLength <= text.byteLength) {
+            if (Scan::startsAt(text, at, key)) {
+                return at;
+            }
+            at = Scan::eol(text, at) + 1;
+        }
+        return -1;
+    }
+
+    /** The offset of the first byte `c` in bytes `a` .. `b` of `s`, or -1. */
+    pub static fn indexOf(s : string, c : i32, a : i64, b : i64) : i64 {
+        for (i of a..b) {
+            if (s.byteAt(i) == c) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** The offset of the last byte `c` in bytes `a` .. `b` of `s`, or -1. */
+    pub static fn lastIndexOf(s : string, c : i32, a : i64, b : i64) : i64 {
+        let mut i : i64 = b - 1;
+        while (i >= a && s.byteAt(i) != c) {
+            i = i - 1;
+        }
+        return i >= a ? i : -1;
+    }
+
+    /** Whether `text` has `word` at byte `at`. */
+    pub static fn startsAt(text : string, at : i64, word : string) : bool {
+        if (at + word.byteLength > text.byteLength) {
+            return false;
+        }
+        for (k of 0..word.byteLength) {
+            if (text.byteAt(at + k) != word.byteAt(k)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Whether `needle` occurs in `hay`. */
+    pub static fn has(hay : string, needle : string) : bool {
+        for (i of 0..hay.byteLength - needle.byteLength + 1) {
+            if (Scan::startsAt(hay, i, needle)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The decimal number in bytes `a` .. `b` of `s`, or -1 when they are not all digits (a leading minus is
+     * allowed).
+     */
+    pub static fn dec(s : string, a : i64, b : i64) : i64 {
+        let negative : bool = a < b && s.byteAt(a) == 45;
+        let first : i64 = negative ? a + 1 : a;
+        if (b <= first) {
+            return -1;
+        }
+        let mut v : i64 = 0;
+        for (i of first..b) {
+            let d : i32 = s.byteAt(i) - 48;
+            if (d < 0 || d > 9) {
+                return -1;
+            }
+            v = v * 10 + (d as i64);
+        }
+        return negative ? -v : v;
+    }
+
+    /** The value of the hexadecimal digit `c`, or -1 when it is not one. */
+    pub static fn digit(c : i32) : i32 {
+        return match c {
+            48..=57 => c - 48,
+            97..=102 => c - 87,
+            65..=70 => c - 55,
+            _ => -1,
+        };
+    }
+
+    /** The hexadecimal number in bytes `a` .. `b` of `s` (up to 16 digits), or -1. */
+    pub static fn hex(s : string, a : i64, b : i64) : i64 {
+        if (b <= a || b - a > 16) {
+            return -1;
+        }
+        let mut v : i64 = 0;
+        for (i of a..b) {
+            let d : i32 = Scan::digit(s.byteAt(i));
+            if (d < 0) {
+                return -1;
+            }
+            v = (v << 4) | (d as i64);
+        }
+        return v;
+    }
+
+    /** The end of `text` once the trailing bytes listed in `chars` are dropped. */
+    static fn trimmedEnd(text : string, chars : string) : i64 {
+        let mut end : i64 = text.byteLength;
+        while (end > 0 && Scan::has(chars, Utf8::slice(text, end - 1, end))) {
+            end = end - 1;
+        }
+        return end;
+    }
+
+    /** The decimal number a short file holds ("1500\n"), or -1. */
+    pub static fn number(text : string) : i64 {
+        return Scan::dec(text, 0, Scan::trimmedEnd(text, " \r\n"));
+    }
+
+    /** The text a short file holds, without its final newline. */
+    pub static fn line(text : string) : string {
+        return Utf8::slice(text, 0, Scan::trimmedEnd(text, "\r\n"));
+    }
+}

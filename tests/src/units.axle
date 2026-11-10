@@ -1,0 +1,18 @@
+// units — checks for the labels of sizes, rates and shares.
+
+use gesso::{Bytes, Percent};
+
+use crate::checks::Checks;
+
+/** The units checks. */
+pub class UnitsSuite {
+    /** Runs every check of the suite. */
+    pub static fn run(c : Checks) : void {
+        c.sameText("units: bytes below a KiB", Bytes::human(512), "512 B");
+        c.sameText("units: a KiB and a half", Bytes::human(1536), "1.5 KiB");
+        c.sameText("units: a rate says per second", Bytes::rate(2048), "2.0 KiB/s");
+        c.sameText("units: a share of a whole", Percent::text(1, 3), "33.3 %");
+        c.sameText("units: no whole is zero", Percent::text(0, 0), "0.0 %");
+        c.sameInt("units: all of it is a thousand tenths", Percent::tenths(1, 1), 1000);
+    }
+}
