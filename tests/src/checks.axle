@@ -1,0 +1,40 @@
+// checks — the tiny harness every suite reports to.
+//
+// A suite is a function that receives `Checks` and states what must hold. The harness counts and names the
+// failures; the test program leaves with their number, so 0 is a pass and CI needs no parser.
+
+/** Collects the outcome of the checks a suite makes. */
+pub class Checks {
+    failed : i32 = 0;
+    total  : i32 = 0;
+
+    /** States that `ok` holds; a miss is printed under `name`. */
+    pub fn that(mut self, name : string, ok : bool) : void {
+        self.total = self.total + 1;
+        if (ok) {
+            return;
+        }
+        self.failed = self.failed + 1;
+        println("FAIL ${name}");
+    }
+
+    /** States that two whole numbers are equal, showing both when they are not. */
+    pub fn sameInt(mut self, name : string, got : i64, want : i64) : void {
+        self.that("${name} (got ${got}, want ${want})", got == want);
+    }
+
+    /** States that two strings are equal, showing both when they are not. */
+    pub fn sameText(mut self, name : string, got : string, want : string) : void {
+        self.that("${name} (got \"${got}\", want \"${want}\")", got == want);
+    }
+
+    /** How many checks missed. */
+    pub fn failures(self) : i32 {
+        return self.failed;
+    }
+
+    /** How many checks ran. */
+    pub fn count(self) : i32 {
+        return self.total;
+    }
+}

@@ -1,0 +1,71 @@
+// main — the checks program: one main that runs every suite in order.
+//
+// The suites are registered here rather than discovered, so the order is visible in one place and a suite that
+// is dropped shows up as a missing call. The exit status is the number of misses, so 0 means every suite held.
+// With a suite's name as the only argument (`tests core`) just that suite runs, which is how CI tells which
+// one failed when a run ends without a word.
+
+use std::lang::IndexOutOfBoundsException;
+use std::sys::process::argAt;
+
+use crate::checks::Checks;
+use crate::core_vocab::CoreSuite;
+use crate::desk::DeskSuite;
+use crate::dns::DnsSuite;
+use crate::fs::FsSuite;
+use crate::machine::MachineSuite;
+use crate::net::NetSuite;
+use crate::net_parse::NetParseSuite;
+use crate::proc::ProcSuite;
+use crate::system::SystemSuite;
+use crate::trace::TraceSuite;
+use crate::units::UnitsSuite;
+
+/** The command line's first argument, or the empty string when there is none. */
+fn mainArgument() : string {
+    try {
+        return argAt(1) + "";
+    } catch e : IndexOutOfBoundsException {
+        return "";
+    }
+}
+
+fn main() : i32 {
+    let c : Checks = new Checks();
+    let only : string = mainArgument();
+    if (only == "" || only == "core") {
+        CoreSuite::run(c);
+    }
+    if (only == "" || only == "units") {
+        UnitsSuite::run(c);
+    }
+    if (only == "" || only == "system") {
+        SystemSuite::run(c);
+    }
+    if (only == "" || only == "proc") {
+        ProcSuite::run(c);
+    }
+    if (only == "" || only == "net") {
+        NetSuite::run(c);
+    }
+    if (only == "" || only == "netparse") {
+        NetParseSuite::run(c);
+    }
+    if (only == "" || only == "dns") {
+        DnsSuite::run(c);
+    }
+    if (only == "" || only == "trace") {
+        TraceSuite::run(c);
+    }
+    if (only == "" || only == "fs") {
+        FsSuite::run(c);
+    }
+    if (only == "" || only == "desk") {
+        DeskSuite::run(c);
+    }
+    if (only == "" || only == "machine") {
+        MachineSuite::run(c);
+    }
+    println("checks: ${c.count()} run, ${c.failures()} failed");
+    return c.failures();
+}
