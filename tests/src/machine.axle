@@ -1,0 +1,160 @@
+// machine — checks for the readings joined: a socket to its process, a process to its program, an address
+// to its name.
+//
+// The join is run over the real machine: what is read is whatever is running now, so the checks state what
+// must hold of any reading (every socket is described, an owner that is seen is found, a program is asked
+// once) rather than particular rows. The fixed rows of the original checks (a given owner list, a given resolver
+// cache, a resolver that cannot be read) needed a fake network and have no counterpart here.
+
+use gesso::{
+    Machine, ProcInfo, SocketInfo, SocketTable, ProcTree, Addr, Endpoint, ReadingStatus, Absent,
+    SysError
+};
+
+use crate::checks::Checks;
+
+/** Whether `machine.process(pid)` is refused as `Absent`. */
+fn machineAbsent(m : Machine, pid : i64) : bool {
+    try {
+        m.process(pid);
+    } catch e : Absent {
+        return true;
+    } catch e : SysError {
+        return false;
+    }
+    return false;
+}
+
+/** Whether `processOf(socket)` is refused as `Absent`. */
+fn machineOwnerAbsent(m : Machine, socket : SocketInfo) : bool {
+    try {
+        m.processOf(socket);
+    } catch e : Absent {
+        return true;
+    } catch e : SysError {
+        return false;
+    }
+    return false;
+}
+
+/** The suite of the joined readings. */
+pub class MachineSuite {
+    /** Runs every check of the suite. */
+    pub static fn run(c : Checks) : void {
+        machineBeforeChecks(c);
+        let m : Machine = new Machine();
+        try {
+            m.refresh();
+            machineProcessChecks(c, m);
+            machineSocketChecks(c, m);
+            machineProgramChecks(c, m);
+            machineNameChecks(c, m);
+            machineReadingChecks(c, m);
+        } catch e : SysError {
+            c.that("machine: the machine could not be read (${e.message})", false);
+        }
+    }
+}
+
+fn machineBeforeChecks(c : Checks) : void {
+    let m : Machine = new Machine();
+    c.that("machine: nothing is read before refresh", !m.hasRead());
+    c.sameInt("machine: no sockets before refresh", m.sockets().size(), 0);
+    c.sameInt("machine: no processes before refresh", m.processes().size(), 0);
+    c.that("machine: the tables are off before refresh", !m.readings()[0 as i64].isOn());
+    c.sameText("machine: no name before refresh", m.nameOf(Addr::v4(203, 0, 113, 77)), "");
+}
+
+fn machineProcessChecks(c : Checks, m : Machine) : void ! SysError {
+    c.that("machine: refresh has read", m.hasRead());
+    c.that("machine: it read processes", m.processes().size() > 0);
+    let top : ProcInfo = m.processes().infoAt(0);
+    let again : ProcInfo = m.process(top.pid);
+    c.sameText("machine: a process is found by its id", again.name, top.name);
+    c.that("machine: an id that is not in the reading is Absent", machineAbsent(m, 2000000000));
+}
+
+fn machineSocketChecks(c : Checks, m : Machine) : void ! SysError {
+    let t : SocketTable = m.sockets();
+    c.sameInt(
+        "machine: the sockets without an owner are counted",
+        t.withoutOwner().size(),
+        t.unowned()
+    );
+    let mut described : bool = true;
+    let mut named : bool = true;
+    let mut joined : bool = true;
+    let mut programs : bool = true;
+    for (i of 0..t.size()) {
+        let s : SocketInfo = t.at(i);
+        let line : string = m.describe(s);
+        described = described && line.byteLength > 0 && line.startsWith(s.proto.label() + " ");
+        named = named && m.ownerName(s).byteLength > 0;
+        if (!s.hasOwner()) {
+            joined = joined && machineOwnerAbsent(m, s);
+            programs = programs && m.programOfSocket(s) == "";
+            continue;
+        }
+        let found : bool = !machineAbsent(m, s.pid);
+        if (found) {
+            joined = joined && m.processOf(s).pid == s.pid
+                && m.ownerName(s) == m.process(s.pid).name;
+        } else {
+            joined = joined && m.ownerName(s) == "(exited)" && machineOwnerAbsent(m, s);
+        }
+    }
+    c.that("machine: every socket is described in a line", described);
+    c.that("machine: every socket has an owner name or the reason for none", named);
+    c.that("machine: a socket's process is the one it names, or Absent", joined);
+    c.that("machine: a socket with no owner has no program", programs);
+    let top : ProcInfo = m.processes().infoAt(0);
+    c.sameInt(
+        "machine: a process's sockets are those of its id",
+        m.socketsOf(top).size(),
+        t.ofPid(top.pid).size()
+    );
+    c.that(
+        "machine: every socket is counted once by user or without",
+        t.size() >= t.withoutOwner().size()
+    );
+}
+
+fn machineProgramChecks(c : Checks, m : Machine) : void ! SysError {
+    let tree : ProcTree = m.processes();
+    let mut coherent : bool = true;
+    let mut steady : bool = true;
+    for (i of 0..tree.size()) {
+        let p : ProcInfo = tree.infoAt(i);
+        let path : string = m.programOf(p);
+        let why : string = m.whyNoProgram(p);
+        coherent = coherent && ((path.byteLength > 0) != (why.byteLength > 0));
+        steady = steady && m.programOf(p) == path;
+    }
+    c.that("machine: a program path or the reason for none, for every process", coherent);
+    c.that("machine: asking again gives the same program", steady);
+    m.refresh();
+    let top : ProcInfo = m.processes().infoAt(0);
+    let known : bool = m.programOf(top).byteLength > 0;
+    c.that(
+        "machine: what is remembered survives a refresh",
+        known == (m.whyNoProgram(top).byteLength == 0)
+    );
+}
+
+fn machineNameChecks(c : Checks, m : Machine) : void {
+    let nowhere : Addr = Addr::v4(203, 0, 113, 77);
+    c.sameText("machine: an address nobody asked for has no name", m.nameOf(nowhere), "");
+    c.sameText(
+        "machine: an endpoint without a name is its address",
+        m.endpointText(new Endpoint(nowhere, 53)),
+        "203.0.113.77:53"
+    );
+}
+
+fn machineReadingChecks(c : Checks, m : Machine) : void {
+    let r : ReadingStatus[] = m.readings();
+    c.sameInt("machine: two sources are reported", r.length, 2);
+    c.sameText("machine: the first source", r[0 as i64].name, "connection tables");
+    c.sameText("machine: the second source", r[1 as i64].name, "dns cache");
+    c.that("machine: the tables are running once read", r[0 as i64].isRunning());
+}
