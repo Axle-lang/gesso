@@ -1,0 +1,30 @@
+# Build output — `axle build` writes here, per package and per example.
+target/
+**/target/
+
+# Produced binaries and their debug info.
+*.exe
+*.pdb
+*.ilk
+*.obj
+*.o
+*.ll
+*.bc
+
+# Editors / OS.
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Snapshots written by `--snap` / F12 (the committed goldens live in snapshots/).
+*.bmp
+!snapshots/*.bmp
+__pycache__/
+*.pyc
+
+# Scratch output of the reference tools.
+/tools/.build/
+
+# C twin build output.
+tools/c_ref/build/

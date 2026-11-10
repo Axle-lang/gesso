@@ -1,0 +1,6 @@
+# .axle files are Rust-like: use Rust for diff hunk headers and GitHub syntax highlighting
+*.axle diff=rust linguist-language=Rust
+
+# The formatter wants LF, and a Windows runner would otherwise check files out with CRLF.
+*.axle text eol=lf
+*.sh text eol=lf
