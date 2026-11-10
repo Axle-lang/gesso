@@ -1,0 +1,325 @@
+// proc — checks for the process id index, the tree, the stat line, and the priority and signal numbers.
+//
+// Rows are built by hand and fed to the tree, and stat lines are given as Linux writes them, so no machine is
+// needed. The python harness also ran `Procs` over a fake machine (named processes, Gone, a plan for a pid it
+// invented); Axle has no seam to substitute, so `Procs` is checked here against the real machine through our
+// own process only, and the plans through values that do not depend on which processes exist.
+
+use gesso::{
+    Absent, Access, Host, Invalid, PidIndex, Plan, Priority, Privilege, ProcClock, ProcInfo,
+    ProcStat, ProcTree, Procs, Signal, SupportState, Utf8
+};
+
+use crate::checks::Checks;
+
+fn procRow(pid : i64, parent : i64, name : string, started : i64) : ProcInfo {
+    return new ProcInfo(pid, parent, name, 1, started, 1000);
+}
+
+fn procSameList(c : Checks, name : string, got : i64[], want : i64[]) : void {
+    let mut same : bool = got.length == want.length;
+    let mut shown : string = "";
+    for (i of 0..got.length) {
+        shown = shown + got[i].toString() + " ";
+        if (same && got[i] != want[i]) {
+            same = false;
+        }
+    }
+    c.that("${name} (got ${shown})", same);
+}
+
+fn procOutline(t : ProcTree) : i64[] {
+    let mut out : i64[] = new i64[t.size()];
+    for (r of 0..t.size()) {
+        out[r as i64] = t.infoAt(r).pid;
+    }
+    return out;
+}
+
+fn procDepths(t : ProcTree) : i64[] {
+    let mut out : i64[] = new i64[t.size()];
+    for (r of 0..t.size()) {
+        out[r as i64] = t.depthAt(r) as i64;
+    }
+    return out;
+}
+
+fn procRefused(line : string, clock : ProcClock) : bool {
+    try {
+        ProcStat::parse(line, clock);
+    } catch e : Invalid {
+        return true;
+    }
+    return false;
+}
+
+/** The proc checks. Helpers are prefixed because top-level names are global to the package. */
+pub class ProcSuite {
+    /** Runs every check of the suite. */
+    pub static fn run(c : Checks) : void {
+        ProcSuite::index(c);
+        ProcSuite::tree(c);
+        ProcSuite::stat(c);
+        ProcSuite::numbers(c);
+        ProcSuite::plans(c);
+        ProcSuite::live(c);
+    }
+
+    static fn index(c : Checks) : void {
+        let ix : PidIndex = new PidIndex(200);
+        for (n of 0..200) {
+            ix.put(n * 7919, n);
+        }
+        let mut all : bool = true;
+        for (n of 0..200) {
+            if (ix.get(n * 7919) != n) {
+                all = false;
+            }
+        }
+        c.that("proc: every id put is found again, at its capacity", all);
+        c.sameInt("proc: an id never put answers -1", ix.get(5), -1);
+        c.sameInt("proc: a large id never put answers -1", ix.get(123456789), -1);
+        ix.put(7919, 999);
+        c.sameInt("proc: a second put replaces the first", ix.get(7919), 999);
+        c.sameInt("proc: id 0 is a valid key, absent at first", new PidIndex(1).get(0), -1);
+        let z : PidIndex = new PidIndex(1);
+        z.put(0, 3);
+        c.sameInt("proc: and found once put", z.get(0), 3);
+        let a : ProcInfo = procRow(10, 1, "x", 100);
+        let b : ProcInfo = procRow(10, 1, "x", 200);
+        c.that(
+            "proc: a reused id is another key",
+            a.key != b.key && a.key == procRow(10, 1, "x", 100).key
+        );
+    }
+
+    static fn tree(c : Checks) : void {
+        let mut rows : ProcInfo[] = new ProcInfo[7];
+        rows[0] = procRow(1, 0, "init", 10);
+        rows[1] = procRow(2, 1, "a", 20);
+        rows[2] = procRow(3, 2, "a1", 30);
+        rows[3] = procRow(4, 1, "b", 40);
+        rows[4] = procRow(5, 2, "a2", 50);
+        rows[5] = procRow(6, 999, "orphan", 60);
+        rows[6] = procRow(7, 7, "self", 70);
+        let t : ProcTree = new ProcTree(rows);
+        procSameList(
+            c,
+            "proc: outline is depth first, children in list order",
+            procOutline(t),
+            [1, 2, 3, 5, 4, 6, 7]
+        );
+        procSameList(c, "proc: depths follow the shape", procDepths(t), [0, 1, 2, 2, 1, 0, 0]);
+        c.sameInt("proc: a missing parent and a self-parent make roots", t.rootCount(), 3);
+        c.sameInt("proc: an orphan has no parent", t.parentPid(6), -1);
+        c.sameInt("proc: a self-parent has no parent", t.parentPid(7), -1);
+        c.sameInt("proc: a parent", t.parentPid(3), 2);
+        procSameList(c, "proc: children in list order", t.childrenOf(1), [2, 4]);
+        procSameList(c, "proc: a leaf has no children", t.childrenOf(3), new i64[0]);
+        procSameList(c, "proc: descendants in outline order", t.descendantsOf(1), [2, 3, 5, 4]);
+        procSameList(c, "proc: descendants of a branch", t.descendantsOf(2), [3, 5]);
+        procSameList(c, "proc: a leaf has no descendants", t.descendantsOf(3), new i64[0]);
+        procSameList(
+            c,
+            "proc: an unknown pid has no descendants",
+            t.descendantsOf(404),
+            new i64[0]
+        );
+        procSameList(c, "proc: ancestors, nearest first", t.ancestorsOf(5), [2, 1]);
+        c.sameInt("proc: row of a process", t.rowOf(4), 4);
+        c.sameInt("proc: row of an unknown process", t.rowOf(404), -1);
+
+        // A reused id: the "parent" 20 now belongs to a process younger than its supposed child.
+        let mut reused : ProcInfo[] = new ProcInfo[2];
+        reused[0] = procRow(20, 1, "young", 900);
+        reused[1] = procRow(21, 20, "child", 100);
+        let r : ProcTree = new ProcTree(reused);
+        c.sameInt("proc: a parent younger than its child is not its parent", r.parentPid(21), -1);
+        c.sameInt("proc: so both are roots", r.rootCount(), 2);
+
+        // Cycles can only come from reused ids; the start times break them, and so must not hang.
+        let mut loop : ProcInfo[] = new ProcInfo[2];
+        loop[0] = procRow(1, 2, "p", 0);
+        loop[1] = procRow(2, 1, "q", 0);
+        let l : ProcTree = new ProcTree(loop);
+        procSameList(
+            c,
+            "proc: a loop of parents still lays out every process",
+            procOutline(l),
+            [1, 2]
+        );
+        c.sameInt("proc: and is cut into one root", l.rootCount(), 1);
+
+        let e : ProcTree = new ProcTree(new ProcInfo[0]);
+        c.that("proc: an empty list is an empty tree", e.size() == 0 && e.rootCount() == 0);
+    }
+
+    static fn stat(c : Checks) : void {
+        let boot : i64 = 1700000000000;
+        let clock : ProcClock = ProcClock { bootMillis: boot, tickMillis: 10, pageBytes: 4096 };
+        let line : string = "4120 (chrome) S 1 4120 4120 0 -1 4194560 100 0 5 0 30 12 0 0 20 0 11 0 1830442 "
+            + "2000000 25641 18446744073709551615";
+        try {
+            let p : ProcInfo = ProcStat::parse(line, clock);
+            c.sameInt("proc: stat pid", p.pid, 4120);
+            c.sameText("proc: stat name", p.name, "chrome");
+            c.sameInt("proc: stat parent", p.parent, 1);
+            c.sameInt("proc: stat threads", p.threads, 11);
+            c.sameInt("proc: start is boot plus ticks", p.started, boot + 1830442 * 10);
+            c.sameInt("proc: memory is pages", p.memory, 25641 * 4096);
+            let tricky : string = "77 (a) b (c d)) R 5 77 77 0 -1 0 0 0 0 0 0 0 0 0 20 0 3 0 99 0 10";
+            let q : ProcInfo = ProcStat::parse(tricky, clock);
+            c.sameText("proc: the name ends at the last parenthesis", q.name, "a) b (c d)");
+            c.sameInt("proc: the parent after a tricky name", q.parent, 5);
+            c.sameInt("proc: the threads after a tricky name", q.threads, 3);
+            let ustat : string = "9 (café) S 1 9 9 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 5 0 2";
+            let u : ProcInfo = ProcStat::parse(ustat, clock);
+            c.sameText("proc: a name with non-ASCII text survives", u.name, "café");
+        } catch e : Invalid {
+            c.that("proc: good stat lines parse (${e.message})", false);
+        }
+        c.that("proc: refused: empty", procRefused("", clock));
+        c.that("proc: refused: no parentheses", procRefused("12 chrome S 1", clock));
+        c.that("proc: refused: no pid", procRefused("(x) S 1", clock));
+        c.that("proc: refused: cut short", procRefused("5 (x) S 1 2 3", clock));
+        c.that("proc: refused: not numbers", procRefused("5 (x) S a 2", clock));
+        let text : string = "cpu  1 2 3\ncpu0 1 2 3\nbtime 1700000123\nprocesses 99\n";
+        c.sameInt(
+            "proc: btime is found at the start of a line",
+            ProcStat::bootSeconds(text),
+            1700000123
+        );
+        c.sameInt(
+            "proc: a line ending in btime is not it",
+            ProcStat::bootSeconds("xbtime 5\n"),
+            -1
+        );
+        c.sameInt("proc: no text, no btime", ProcStat::bootSeconds(""), -1);
+        c.sameInt("proc: btime at the very end of the text", ProcStat::bootSeconds("btime 42"), 42);
+    }
+
+    static fn numbers(c : Checks) : void {
+        let mut levels : Priority[] = new Priority[5];
+        levels[0] = Priority::Idle;
+        levels[1] = Priority::BelowNormal;
+        levels[2] = Priority::Normal;
+        levels[3] = Priority::AboveNormal;
+        levels[4] = Priority::High;
+        let mut nice : bool = true;
+        let mut win : bool = Priority::fromWinClass(Priority::Realtime.winClass())
+            == Priority::Realtime;
+        for (i of 0..levels.length) {
+            if (Priority::fromNice(levels[i].nice()) != levels[i]) {
+                nice = false;
+            }
+            if (Priority::fromWinClass(levels[i].winClass()) != levels[i]) {
+                win = false;
+            }
+        }
+        c.that("proc: nice values round-trip through the levels", nice);
+        c.that(
+            "proc: nice edges",
+            Priority::fromNice(19) == Priority::Idle && Priority::fromNice(0) == Priority::Normal
+                && Priority::fromNice(-20) == Priority::High
+                && Priority::fromNice(-5) == Priority::AboveNormal
+                && Priority::fromNice(4) == Priority::Normal
+                && Priority::fromNice(5) == Priority::BelowNormal
+        );
+        c.that("proc: Windows classes round-trip", win);
+        c.that("proc: an unknown class is normal", Priority::fromWinClass(0) == Priority::Normal);
+        c.that(
+            "proc: the scale is the order",
+            Priority::at(-1) == Priority::Idle && Priority::at(0) == Priority::Idle
+                && Priority::at(1) == Priority::BelowNormal
+                && Priority::at(2) == Priority::Normal
+                && Priority::at(3) == Priority::AboveNormal
+                && Priority::at(4) == Priority::High
+                && Priority::at(5) == Priority::Realtime
+                && Priority::at(6) == Priority::Realtime
+        );
+        c.that(
+            "proc: signal numbers are POSIX's",
+            Signal::Interrupt.posix() == 2 && Signal::Terminate.posix() == 15
+                && Signal::Kill.posix() == 9
+                && Signal::Hangup.posix() == 1
+                && Signal::Stop.posix() == 19
+                && Signal::Resume.posix() == 18
+        );
+        c.that(
+            "proc: same-folded text",
+            Utf8::sameFolded("Chrome.EXE", "chrome.exe") && !Utf8::sameFolded("a", "ab")
+                && !Utf8::sameFolded("a", "b")
+        );
+    }
+
+    // Plans never touch a process: priority is read only to promise a way back, and a pid that cannot exist
+    // promises none.
+    static fn plans(c : Checks) : void {
+        let none : i64 = 2000000000;
+        c.that(
+            "proc: a plan for a process that is gone promises no way back",
+            !Procs::planSetPriority(none, Priority::Idle).reversible()
+        );
+        let rt : Plan = Procs::planSetPriority(none, Priority::Realtime);
+        c.that(
+            "proc: real time is an admin step",
+            rt.highest() == Access::Admin && rt.needs() == Privilege::Elevated
+        );
+        c.that("proc: kill cannot be undone", !Procs::planSignal(none, Signal::Kill).reversible());
+        c.that("proc: stop can", Procs::planSignal(none, Signal::Stop).reversible());
+        c.sameText(
+            "proc: the undo of a stop",
+            Procs::planSignal(none, Signal::Stop).undoAt(0),
+            "resume process 2000000000"
+        );
+        let ord : Plan = Procs::planSetPriority(none, Priority::Idle);
+        c.sameText(
+            "proc: a plan says what it does",
+            ord.whatAt(0),
+            "set the priority of process 2000000000 to idle"
+        );
+        c.sameInt("proc: a plan of one step", ord.count(), 1);
+        c.that(
+            "proc: an ordinary level is unknown until tried",
+            Procs::canSetPriority(Priority::Idle).state == SupportState::Unknown
+        );
+        c.that(
+            "proc: a signal is never promised",
+            Procs::canSignal(Signal::Kill).state == SupportState::Unknown
+        );
+    }
+
+    // Omitted from the python spec: names, find and imagePath over a fake process list, Gone for a process
+    // that is not there, and acting on a fake one. Here only our own process stands for the real list.
+    static fn live(c : Checks) : void {
+        let me : i64 = Host::info().pid;
+        try {
+            let all : ProcInfo[] = Procs::list();
+            let mut seen : bool = false;
+            for (i of 0..all.length) {
+                if (all[i].pid == me) {
+                    seen = true;
+                }
+            }
+            c.that("proc: the list holds our own process", seen);
+            let t : ProcTree = Procs::tree();
+            let drift : i32 = t.size() - (all.length as i32);
+            c.that(
+                "proc: the tree has the size of the list, give or take processes that came and went (${drift})",
+                drift >= -20 && drift <= 20
+            );
+            c.that("proc: our process is a row of the tree", t.rowOf(me) >= 0);
+            c.that("proc: and the tree has a root", t.rootCount() >= 1);
+            c.sameInt("proc: get finds one", Procs::get(me).pid, me);
+        } catch e : IOException {
+            c.that("proc: the real list is readable (${e.message})", false);
+        }
+        let mut absent : bool = false;
+        try {
+            Procs::get(2000000000);
+        } catch e2 : Absent {
+            absent = true;
+        } catch e3 : IOException {}
+        c.that("proc: get refuses a process that is not there", absent);
+    }
+}
