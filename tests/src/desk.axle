@@ -1,0 +1,213 @@
+// desk — checks for the desktop and the programs' paths: what `reveal` refuses, the batch and the cache of
+// program paths, and the file addresses the Linux file manager is asked with.
+//
+// A path that `reveal` accepts opens a window on the machine running the checks, so only the refusals are
+// made here; the passing-on of exact UTF-16 units to the desktop needed a fake desktop and has none.
+
+use gesso::{
+    Desk, Procs, ProcInfo, ImagePaths, ImagePathCache, FileUri, Utf16, Access, SupportState,
+    Invalid, SysError
+};
+
+use crate::checks::Checks;
+
+/** A text of `n` copies of the letter `ch`. */
+fn deskRepeat(ch : string, n : i32) : string {
+    let mut s : string = "";
+    for (i of 0..n) {
+        s = s + ch;
+    }
+    return s;
+}
+
+/** Whether `reveal` of `path` is refused as `Invalid`, before the desktop is asked. */
+fn deskRefuses(path : string) : bool {
+    try {
+        Desk::reveal(path);
+    } catch e : Invalid {
+        return true;
+    } catch e : SysError {
+        return false;
+    }
+    return false;
+}
+
+/** Whether `revealUnits` of `units` is refused as `Invalid`. */
+fn deskRefusesUnits(units : i32[]) : bool {
+    try {
+        Desk::revealUnits(units);
+    } catch e : Invalid {
+        return true;
+    } catch e : SysError {
+        return false;
+    }
+    return false;
+}
+
+/** The processes now running, or none if they cannot be listed. */
+fn deskProcesses() : ProcInfo[] {
+    try {
+        return Procs::list();
+    } catch e : SysError {
+        return new ProcInfo[0];
+    }
+}
+
+/** The path of the program of `pid`, or empty when it cannot be read. */
+fn deskPathOf(pid : i64) : string {
+    try {
+        return Procs::imagePath(pid);
+    } catch e : SysError {
+        return "";
+    }
+}
+
+/** The suite of the desktop and the programs' paths. */
+pub class DeskSuite {
+    /** Runs every check of the suite. */
+    pub static fn run(c : Checks) : void {
+        deskRevealChecks(c);
+        deskBatchChecks(c);
+        deskCacheChecks(c);
+        deskUriChecks(c);
+    }
+}
+
+fn deskRevealChecks(c : Checks) : void {
+    c.that("desk: an empty path is refused", deskRefuses(""));
+    c.that("desk: a path with a quote is refused", deskRefuses("C:\\a\"b"));
+    c.that("desk: a path too long is refused", deskRefuses(deskRepeat("x", 1001)));
+    c.that("desk: a NUL in the units is refused", deskRefusesUnits([65, 0, 66]));
+    c.that("desk: a quote in the units is refused", deskRefusesUnits([65, 34, 66]));
+    c.that("desk: no units are refused", deskRefusesUnits(new i32[0]));
+    c.that("desk: revealing changes nothing", Desk::revealAccess() == Access::Read);
+    c.that(
+        "desk: revealing is not ruled out",
+        Desk::canReveal().state != SupportState::Unsupported
+    );
+}
+
+fn deskBatchChecks(c : Checks) : void {
+    let procs : ProcInfo[] = deskProcesses();
+    c.that("desk: there are processes to ask about", procs.length >= 1);
+    if (procs.length < 1) {
+        return;
+    }
+    let last : i64 = procs.length - 1;
+    let ids : i64[] = [procs[0 as i64].pid, 2000000000, procs[last].pid];
+    let res : ImagePaths = Procs::imagePaths(ids);
+    c.sameInt("desk: a batch keeps going past a refusal", res.size(), 3);
+    c.sameInt("desk: order is the order asked, first", res.pidAt(0), ids[0 as i64]);
+    c.sameInt("desk: order is the order asked, second", res.pidAt(1), 2000000000);
+    c.sameInt("desk: order is the order asked, third", res.pidAt(2), ids[2 as i64]);
+    c.that("desk: an id that is not there has a reason", res.whyAt(1).byteLength > 0);
+    c.sameText("desk: and no path", res.pathAt(1), "");
+    c.sameText("desk: pathOf an id without a path", res.pathOf(2000000000), "");
+    c.sameInt("desk: an id never asked for is not indexed", res.indexOf(777777777), -1);
+    c.sameText("desk: an id never asked for has no path", res.pathOf(777777777), "");
+    let mut either : bool = true;
+    for (i of 0..3) {
+        let hasPath : bool = res.pathAt(i).byteLength > 0;
+        let hasWhy : bool = res.whyAt(i).byteLength > 0;
+        either = either && (hasPath != hasWhy);
+    }
+    c.that("desk: each id has its path or its reason, never both", either);
+    c.that(
+        "desk: resolved counts the ones with a path",
+        res.resolved() >= 0 && res.resolved() <= 2
+    );
+    let mut found : i64 = -1;
+    for (i of 0..procs.length) {
+        if (found < 0 && deskPathOf(procs[i].pid).byteLength > 0) {
+            found = procs[i].pid;
+        }
+    }
+    c.that("desk: some program path can be read", found >= 0);
+    if (found >= 0) {
+        let want : i32[] = Utf16::units(deskPathOf(found));
+        try {
+            let got : i32[] = Procs::imagePathUnits(found);
+            let mut same : bool = got.length == want.length;
+            for (i of 0..want.length) {
+                if (same && got[i] != want[i]) {
+                    same = false;
+                }
+            }
+            c.that("desk: the units of a path are those of its text", same);
+        } catch e : SysError {
+            c.that("desk: the units of a path could not be read (${e.message})", false);
+        }
+    }
+}
+
+fn deskCacheChecks(c : Checks) : void {
+    let procs : ProcInfo[] = deskProcesses();
+    if (procs.length < 1) {
+        c.that("desk: there are processes to cache", false);
+        return;
+    }
+    let cache : ImagePathCache = new ImagePathCache();
+    c.that("desk: the cache is empty at first", cache.size() == 0 && !cache.knows(procs[0 as i64]));
+    cache.resolveAll(procs);
+    c.sameInt("desk: every process was asked once", cache.size(), procs.length);
+    c.that("desk: and is known", cache.knows(procs[0 as i64]));
+    let mut coherent : bool = true;
+    for (i of 0..procs.length) {
+        let path : string = cache.pathOf(procs[i]);
+        let why : string = cache.why(procs[i]);
+        coherent = coherent && ((path.byteLength > 0) != (why.byteLength > 0));
+    }
+    c.that("desk: a path or a reason is remembered for each", coherent);
+    let top : ProcInfo = procs[0 as i64];
+    c.sameText(
+        "desk: the cache gives what the system gave",
+        cache.pathOf(top),
+        deskPathOf(top.pid)
+    );
+    cache.resolveAll(procs);
+    c.sameInt("desk: asking again adds nothing", cache.size(), procs.length);
+    let first : ProcInfo = procs[0 as i64];
+    let reused : ProcInfo = new ProcInfo(
+        first.pid,
+        first.parent,
+        first.name,
+        first.threads,
+        first.started + 1,
+        first.memory
+    );
+    c.that("desk: a reused id with another start time is a miss", !cache.knows(reused));
+    cache.resolve(reused);
+    c.sameInt("desk: and is kept next to the old one", cache.size(), procs.length + 1);
+    let many : ImagePathCache = new ImagePathCache();
+    for (i of 0..4200) {
+        many.resolve(new ProcInfo((i + 100) as i64, 1, "p", 1, i as i64, 0));
+    }
+    c.sameInt("desk: it grows past its first room", many.size(), 4200);
+    c.that("desk: and still finds them", many.knows(new ProcInfo(600, 1, "p", 1, 500, 0)));
+    c.that(
+        "desk: and tells another start apart",
+        !many.knows(new ProcInfo(600, 1, "p", 1, 501, 0))
+    );
+    cache.clear();
+    c.that("desk: clearing makes it forget", cache.size() == 0 && !cache.knows(procs[0 as i64]));
+    c.sameText(
+        "desk: and ask again",
+        cache.pathOf(procs[0 as i64]),
+        deskPathOf(procs[0 as i64].pid)
+    );
+}
+
+fn deskUriChecks(c : Checks) : void {
+    c.sameText("desk: a plain path", FileUri::encode("/home/me/a.txt"), "file:///home/me/a.txt");
+    c.sameText(
+        "desk: spaces and punctuation are encoded",
+        FileUri::encode("/home/me/a b#c%d.txt"),
+        "file:///home/me/a%20b%23c%25d.txt"
+    );
+    c.sameText(
+        "desk: UTF-8 bytes are encoded one by one",
+        FileUri::encode("/home/zoé/日.txt"),
+        "file:///home/zo%C3%A9/%E6%97%A5.txt"
+    );
+    c.sameText("desk: the safe marks stay", FileUri::encode("/a-b_c.d~e/f"), "file:///a-b_c.d~e/f");
+}

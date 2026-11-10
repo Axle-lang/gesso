@@ -1,0 +1,42 @@
+// sys/desksys — the desktop, on Linux: showing a file in the file manager.
+//
+// Linux has no single way to ask a file manager to *select* a file. The D-Bus call that does
+// (`org.freedesktop.FileManager1.ShowItems`) is answered by Nautilus, Dolphin, Thunar and most others, so it
+// is tried first; where nothing answers (no session bus, a file manager that does not implement it) the
+// file's folder is opened with `xdg-open` and the file is shown among its neighbours, not highlighted. A
+// machine with neither (a server, a minimal container) says `Unsupported`.
+
+use crate::core::error::{SysError, Unsupported, OsFailure};
+use crate::core::fsinfo::FileStat;
+use crate::core::scan::Scan;
+use crate::core::text::{Utf8, Utf16};
+use crate::sys::filemanager::FileManager;
+use crate::sys::fssys::FsSys;
+
+/** The desktop. */
+pub class DeskSys {
+    /** Show the file or folder at `path` (UTF-16 code units) in the file manager. */
+    pub static fn reveal(path : i32[]) : void ! SysError {
+        let text : string = Utf16::decode(path, path.length as i32);
+        let st : FileStat = FsSys::stat(text);
+        if (FileManager::select(text)) {
+            return;
+        }
+        let mut folder : string = text;
+        if (!st.isDir()) {
+            let cut : i64 = Scan::lastIndexOf(text, 47, 0, text.byteLength);
+            folder = cut <= 0 ? "/" : Utf8::slice(text, 0, cut);
+        }
+        let code : i32 = FileManager::open(folder);
+        if (code < 0) {
+            throw Unsupported(
+                "desk.reveal",
+                "linux",
+                "neither a file manager on the session bus nor xdg-open answered"
+            );
+        }
+        if (code != 0) {
+            throw OsFailure("desk.reveal", code, "xdg-open");
+        }
+    }
+}
