@@ -1,0 +1,18 @@
+// sys/battery — what the Windows power status says of the battery, for the Windows power seam.
+
+use crate::core::sysinfo::{BatteryState, Mains};
+use crate::sys::kernel32::BATTERY_CHARGING;
+
+/** Reading `SYSTEM_POWER_STATUS`. */
+pub class Battery {
+    /** How the battery stands, from `BatteryFlag`, the mains and the charge. */
+    pub static fn state(flag : i32, mains : Mains, percent : i32) : BatteryState {
+        if ((flag & BATTERY_CHARGING) != 0) {
+            return BatteryState::Charging;
+        }
+        if (mains == Mains::Online && percent == 100) {
+            return BatteryState::Full;
+        }
+        return mains == Mains::Offline ? BatteryState::Discharging : BatteryState::Unknown;
+    }
+}

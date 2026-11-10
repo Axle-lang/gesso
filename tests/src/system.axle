@@ -1,0 +1,154 @@
+// system — checks for memory text, processor load between readings, and the machine's power.
+//
+// The readings are text and numbers handed in by the check, so no machine is needed for the arithmetic.
+// The python harness also ran `Power::now` and `CpuMeter` over a fake machine; Axle has no seam to
+// substitute, so those two are checked here only for what holds on any real machine.
+
+use gesso::{
+    BatteryState, CpuLoad, CpuMeter, CpuTimes, Host, Mains, MemText, MemoryInfo, Power, PowerInfo
+};
+
+use crate::checks::Checks;
+
+/** The system checks. Helpers are prefixed because top-level names are global to the package. */
+pub class SystemSuite {
+    /** Runs every check of the suite. */
+    pub static fn run(c : Checks) : void {
+        SystemSuite::memory(c);
+        SystemSuite::cpuText(c);
+        SystemSuite::cpuLoad(c);
+        SystemSuite::power(c);
+        SystemSuite::live(c);
+    }
+
+    static fn memory(c : Checks) : void {
+        let text : string = "MemTotal:       16318828 kB\nMemFree:         1000000 kB\n"
+            + "MemAvailable:    8000000 kB\nBuffers:           10 kB\n";
+        let mem : (total: i64, available: i64) = MemText::parse(text);
+        c.sameInt("system: meminfo total in bytes", mem.total, (16318828 as i64) * 1024);
+        c.sameInt("system: meminfo available in bytes", mem.available, (8000000 as i64) * 1024);
+        let part : (total: i64, available: i64) = MemText::parse("MemTotal: 5 kB\n");
+        c.sameInt("system: a kernel that does not say has no available", part.available, -1);
+        c.sameInt("system: the total it did say", part.total, (5 as i64) * 1024);
+        let none : (total: i64, available: i64) = MemText::parse("");
+        c.that("system: an empty text has no reading", none.total == -1 && none.available == -1);
+    }
+
+    static fn cpuText(c : Checks) : void {
+        let text : string = "cpu  4705 150 1120 16250 520 0 30 0 0 0\n"
+            + "cpu0 2000 100 500 8000 200 0 10 0 0 0\nintr 12345\n";
+        let t : CpuTimes = CpuTimes::parse(text);
+        c.sameInt("system: idle counts iowait", t.idle, 16250 + 520);
+        c.sameInt(
+            "system: the first line is the total",
+            t.total,
+            4705 + 150 + 1120 + 16250 + 520 + 30
+        );
+        c.sameInt("system: no cpu line, no reading", CpuTimes::parse("intr 5\n").total, -1);
+        c.sameInt("system: an empty text, no reading", CpuTimes::parse("").total, -1);
+        c.sameInt(
+            "system: a cpu line of words, no reading",
+            CpuTimes::parse("cpu a b c\n").total,
+            -1
+        );
+    }
+
+    static fn cpuLoad(c : Checks) : void {
+        let m : CpuLoad = new CpuLoad();
+        c.that("system: a meter that has seen nothing is not ready", !m.ready());
+        c.sameInt("system: and says 0", m.percent(), 0);
+        m.feed(new CpuTimes(1000, 2000));
+        c.that("system: one reading is not enough", !m.ready());
+        m.feed(new CpuTimes(1500, 3000));
+        c.that("system: two readings are", m.ready());
+        c.sameInt("system: load is the busy share of the interval", m.tenths(), 500);
+        c.sameInt("system: as a whole percent", m.percent(), 50);
+        m.feed(new CpuTimes(1500, 3100));
+        c.sameInt("system: fully busy", m.tenths(), 1000);
+        c.sameInt("system: fully busy is 100 percent", m.percent(), 100);
+        m.feed(new CpuTimes(1600, 3200));
+        c.sameInt("system: fully idle", m.tenths(), 0);
+        m.feed(new CpuTimes(1600, 3200));
+        c.sameInt("system: no ticks between readings keeps the last answer", m.tenths(), 0);
+        m.feed(new CpuTimes(10, 20));
+        c.sameInt("system: counters that went back are no measurement", m.tenths(), 0);
+        m.feed(new CpuTimes(-1, -1));
+        c.that("system: an unreadable reading is ignored", m.ready());
+        let m2 : CpuLoad = new CpuLoad();
+        m2.feed(new CpuTimes(0, 100));
+        m2.feed(new CpuTimes(1, 1001));
+        c.sameInt("system: load keeps its tenths", m2.tenths(), 998);
+        c.sameInt("system: percent rounds", m2.percent(), 100);
+    }
+
+    static fn power(c : Checks) : void {
+        let online : PowerInfo = PowerInfo::none(Mains::Online);
+        c.sameText("system: no battery, plugged in", online.describe(), "plugged in");
+        c.that("system: and no battery", !online.hasBattery() && online.pluggedIn());
+        c.sameText(
+            "system: no battery, no mains",
+            PowerInfo::none(Mains::Offline).describe(),
+            "no battery"
+        );
+        let p : PowerInfo = PowerInfo {
+            state: BatteryState::Discharging,
+            percent: 78,
+            mains: Mains::Offline,
+            minutesLeft: 192,
+        };
+        c.sameText(
+            "system: a reading in one line",
+            p.describe(),
+            "78% · on battery · 3 h 12 min left"
+        );
+        c.that("system: it has a battery and is not plugged in", p.hasBattery() && !p.pluggedIn());
+        let q : PowerInfo = PowerInfo { state: BatteryState::Charging, mains: Mains::Online };
+        c.sameText("system: unknown charge and time", q.describe(), "? · charging");
+        c.that(
+            "system: Windows mains words",
+            Mains::fromWindows(1) == Mains::Online && Mains::fromWindows(0) == Mains::Offline
+                && Mains::fromWindows(255) == Mains::Unknown
+        );
+        c.that(
+            "system: Linux status words",
+            BatteryState::fromLinux("Charging") == BatteryState::Charging
+                && BatteryState::fromLinux("Discharging") == BatteryState::Discharging
+                && BatteryState::fromLinux("Not charging") == BatteryState::Full
+                && BatteryState::fromLinux("Full") == BatteryState::Full
+                && BatteryState::fromLinux("???") == BatteryState::Unknown
+        );
+    }
+
+    // Omitted from the python spec: the fake machine's fixed battery and counters. Here the real machine
+    // answers, so only what is true of any machine is stated.
+    static fn live(c : Checks) : void {
+        try {
+            let mem : MemoryInfo = Host::memory();
+            c.that("system: this machine has memory", mem.total > 0);
+            c.that(
+                "system: and some of it is available",
+                mem.available >= 0 && mem.available <= mem.total
+            );
+        } catch e : IOException {
+            c.that("system: memory is readable (${e.message})", false);
+        }
+        try {
+            let meter : CpuMeter = CpuMeter::start();
+            c.that("system: a started meter is not ready until updated", !meter.ready());
+            meter.update();
+            c.that(
+                "system: a meter's percent is a percent",
+                meter.percent() >= 0 && meter.percent() <= 100
+            );
+            let p : PowerInfo = Power::now();
+            c.that("system: power describes itself", p.describe().byteLength > 0);
+        } catch e2 : IOException {
+            c.that("system: the processor and power are readable (${e2.message})", false);
+        }
+        let info = Host::info();
+        c.that(
+            "system: the host has an os and a process id",
+            info.os.byteLength > 0 && info.pid > 0
+        );
+    }
+}
