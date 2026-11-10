@@ -1,0 +1,362 @@
+// trace — checks for a live trace as data: the payloads of Kernel-Network and DNS-Client events decoded,
+// and the running counts kept over them.
+//
+// The payloads are written out here byte by byte, in the layouts the providers' manifests give. The Python
+// harness also ran `NetTrace` over a fake trace session (a poll that finds six scripted events, a session
+// that reports dropped events); Axle has no seam to put a fake session in, and a real one needs an elevated
+// session, so those checks are not here. The statuses a failed start leaves are checked, because they are
+// built from the failure alone.
+
+use gesso::{
+    Addr, Denied, DnsClient, Invalid, KernelNet, NetTrace, Privilege, Proto, ReadingState,
+    ReadingStatus, SupportState, TraceCounters, TraceEvent, TraceKind, Unsupported
+};
+
+use crate::checks::Checks;
+use crate::dns::WireBuf;
+
+/** The trace checks. */
+pub class TraceSuite {
+    /** Runs every check of the suite. */
+    pub static fn run(c : Checks) : void {
+        TraceSuite::kernel(c);
+        TraceSuite::resolver(c);
+        TraceSuite::counters(c);
+        TraceSuite::names(c);
+        TraceSuite::start(c);
+    }
+
+    /** The Kernel-Network events. */
+    pub(file) static fn kernel(c : Checks) : void {
+        let mut e : TraceEvent = traceDecode(
+            10,
+            traceV4(4120, 1448, "93.184.216.34", "192.168.1.20", 443, 51000)
+        );
+        c.that(
+            "trace: a TCP send is a send of TCP from pid 4120 of 1448 bytes",
+            e.kind == TraceKind::Send && e.pid == 4120 && e.bytes == 1448 && e.proto == Proto::Tcp
+        );
+        c.sameText(
+            "trace: a TCP send: this end is the source",
+            e.local.text(),
+            "192.168.1.20:51000"
+        );
+        c.sameText(
+            "trace: a TCP send: the peer is the destination",
+            e.remote.text(),
+            "93.184.216.34:443"
+        );
+
+        e = traceDecode(11, traceV4(4120, 900, "192.168.1.20", "93.184.216.34", 51000, 443));
+        c.that(
+            "trace: a TCP receive is a receive of 900 bytes",
+            e.kind == TraceKind::Receive && e.bytes == 900
+        );
+        c.sameText(
+            "trace: a TCP receive: the destination is this end",
+            e.local.text(),
+            "192.168.1.20:51000"
+        );
+        c.sameText(
+            "trace: a TCP receive: the source is the peer",
+            e.remote.text(),
+            "93.184.216.34:443"
+        );
+
+        e = traceDecode(12, traceV4(77, 0, "10.1.1.1", "10.0.0.2", 22, 40000));
+        c.that(
+            "trace: a connect is a connection event with no bytes",
+            e.kind == TraceKind::Connect && e.bytes == 0 && e.pid == 77
+        );
+        c.sameText("trace: a connect names the peer", e.remote.text(), "10.1.1.1:22");
+
+        c.sameText(
+            "trace: an accept reads like a receive",
+            traceDecode(15, traceV4(1, 0, "10.0.0.2", "10.9.9.9", 80, 5000)).remote.text(),
+            "10.9.9.9:5000"
+        );
+        c.sameText(
+            "trace: a disconnect reads like a send",
+            traceDecode(13, traceV4(1, 0, "10.9.9.9", "10.0.0.2", 80, 5000)).remote.text(),
+            "10.9.9.9:80"
+        );
+
+        e = traceDecode(26, traceV6(9, 100, "2606:4700::1111", "2001:db8::2", 443, 50000));
+        c.that("trace: IPv6 send", e.kind == TraceKind::Send && e.bytes == 100);
+        c.sameText("trace: IPv6 send, this end", e.local.text(), "[2001:db8::2]:50000");
+        c.sameText("trace: IPv6 send, the peer", e.remote.text(), "[2606:4700::1111]:443");
+
+        e = traceDecode(42, traceV4(5, 64, "8.8.8.8", "10.0.0.2", 53, 40000));
+        c.that("trace: UDP send", e.proto == Proto::Udp && e.kind == TraceKind::Send);
+        c.that(
+            "trace: UDP receive",
+            traceDecode(43, traceV4(5, 64, "10.0.0.2", "8.8.8.8", 40000, 53)).proto == Proto::Udp
+        );
+        c.that(
+            "trace: IPv6 UDP receive",
+            traceDecode(59, traceV6(5, 8, "::1", "::1", 1, 2)).proto == Proto::Udp
+        );
+
+        let any : WireBuf = traceV4(1, 1, "1.1.1.1", "2.2.2.2", 1, 2);
+        c.that(
+            "trace: ids that are not transfers or connections are Other",
+            !traceDecode(14, any).isKnown() && !traceDecode(17, any).isKnown()
+                && !traceDecode(999, any).isKnown()
+        );
+
+        let v4 : WireBuf = traceV4(1, 1, "1.1.1.1", "2.2.2.2", 1, 2);
+        let v6 : WireBuf = traceV6(1, 1, "::1", "::1", 1, 2);
+        c.that(
+            "trace: an IPv4 payload cut short is Other, not a guess",
+            !KernelNet::decode(10, v4.array(), 19).isKnown()
+        );
+        c.that(
+            "trace: an IPv6 payload cut short is Other, not a guess",
+            !KernelNet::decode(26, v6.array(), 43).isKnown()
+        );
+        c.that("trace: an empty payload is Other", !KernelNet::decode(10, new i32[0], 0).isKnown());
+        c.that(
+            "trace: a payload exactly long enough is read",
+            KernelNet::decode(10, v4.array(), 20).isKnown()
+        );
+
+        c.sameInt(
+            "trace: a big byte count is read as unsigned",
+            traceDecode(10, traceV4(1, 4294967295, "1.1.1.1", "2.2.2.2", 1, 2)).bytes,
+            4294967295
+        );
+        c.sameInt(
+            "trace: the ports are big-endian",
+            traceDecode(10, traceV4(1, 1, "1.1.1.1", "2.2.2.2", 443, 51000)).remote.port,
+            443
+        );
+        c.sameText(
+            "trace: a TCP send is described in a line",
+            traceDecode(
+                10,
+                traceV4(4120, 1448, "93.184.216.34", "192.168.1.20", 443, 51000)
+            ).describe(),
+            "sent 1448 bytes tcp 192.168.1.20:51000 → 93.184.216.34:443 (pid 4120)"
+        );
+    }
+
+    /** The DNS-Client events. */
+    pub(file) static fn resolver(c : Checks) : void {
+        let mut d : WireBuf = traceDns("api.stripe.com", 0, "52.1.2.3;2001:db8::7;");
+        let mut e : TraceEvent = DnsClient::decode(3008, 4120, d.array(), d.size());
+        c.that(
+            "trace: a resolution: the process and the kind",
+            e.kind == TraceKind::Resolved && e.pid == 4120
+        );
+        c.sameText("trace: a resolution: the name asked for", e.name, "api.stripe.com");
+        c.sameText("trace: a resolution: what it got", e.answers, "52.1.2.3;2001:db8::7;");
+        c.sameText(
+            "trace: a resolution is described in a line",
+            e.describe(),
+            "pid 4120 resolved api.stripe.com"
+        );
+        let got : Addr[] = e.addresses();
+        c.sameInt("trace: its addresses (count)", got.length, 2);
+        if (got.length == 2) {
+            c.that(
+                "trace: its addresses",
+                got[0 as i64].text() == "52.1.2.3" && got[1 as i64].text() == "2001:db8::7"
+            );
+        }
+
+        d = traceDns("alias.example", 0, "type: 5 target.example;93.184.216.34;");
+        e = DnsClient::decode(3008, 1, d.array(), d.size());
+        let only : Addr[] = e.addresses();
+        c.sameInt("trace: answers that are not addresses are skipped (count)", only.length, 1);
+        if (only.length == 1) {
+            c.sameText(
+                "trace: answers that are not addresses are skipped",
+                only[0 as i64].text(),
+                "93.184.216.34"
+            );
+        }
+
+        d = traceDns("nope.example", 9003, "");
+        e = DnsClient::decode(3008, 1, d.array(), d.size());
+        c.that(
+            "trace: a failed query is still a resolution, with no answers",
+            e.kind == TraceKind::Resolved && e.name == "nope.example" && e.answers == ""
+        );
+        c.sameInt("trace: a failed query has no addresses", e.addresses().length, 0);
+
+        c.that(
+            "trace: another id is Other",
+            !DnsClient::decode(3006, 1, d.array(), d.size()).isKnown()
+        );
+        c.that(
+            "trace: a cut payload is Other",
+            !DnsClient::decode(3008, 1, d.array(), 5).isKnown()
+        );
+        c.that(
+            "trace: an empty payload is Other",
+            !DnsClient::decode(3008, 1, new i32[0], 0).isKnown()
+        );
+
+        let unterminated : WireBuf = new WireBuf();
+        unterminated.le16(97);
+        unterminated.le16(98);
+        unterminated.le16(99);
+        c.that(
+            "trace: a name with no terminator is not read past the end",
+            !DnsClient::decode(3008, 1, unterminated.array(), unterminated.size()).isKnown()
+        );
+    }
+
+    /** The counters over Kernel-Network events. */
+    pub(file) static fn counters(c : Checks) : void {
+        let k : TraceCounters = new TraceCounters(3);
+        k.add(traceDecode(10, traceV4(100, 1000, "1.1.1.1", "10.0.0.2", 443, 50000)));
+        k.add(traceDecode(10, traceV4(100, 500, "1.1.1.1", "10.0.0.2", 443, 50000)));
+        k.add(traceDecode(11, traceV4(100, 4000, "10.0.0.2", "1.1.1.1", 50000, 443)));
+        k.add(traceDecode(10, traceV4(200, 70, "2.2.2.2", "10.0.0.2", 80, 50001)));
+        k.add(traceDecode(14, traceV4(200, 70, "2.2.2.2", "10.0.0.2", 80, 50001)));
+
+        c.sameInt("trace: bytes sent by a process", k.bytesSent(100), 1500);
+        c.sameInt("trace: bytes received by a process", k.bytesReceived(100), 4000);
+        c.sameInt("trace: bytes sent by another process", k.bytesSent(200), 70);
+        c.sameInt("trace: a process that only sent received nothing", k.bytesReceived(200), 0);
+        c.sameInt("trace: two processes were seen", k.pidCount(), 2);
+        c.sameInt("trace: processes are in the order first seen", k.pidAt(0), 100);
+        c.sameInt("trace: total sent", k.totalSent(), 1570);
+        c.sameInt("trace: total received", k.totalReceived(), 4000);
+        c.sameInt("trace: an unknown process sent 0", k.bytesSent(999), 0);
+        c.sameInt("trace: events of a kind not read are not counted", k.eventsSeen(), 4);
+
+        for (i of 0..5) {
+            k.add(traceDecode(
+                12,
+                traceV4(300 + i, 0, "9.9.9." + i.toString(), "10.0.0.2", 80, 40000 + i)
+            ));
+        }
+        k.add(traceDecode(13, traceV4(300, 0, "9.9.9.0", "10.0.0.2", 80, 40000)));
+        c.sameInt(
+            "trace: connections opened are counted, and a close is not an opening",
+            k.connectionsOf(300),
+            1
+        );
+        c.sameInt("trace: another process's connection is counted", k.connectionsOf(304), 1);
+        c.sameInt("trace: a process that opened nothing has none", k.connectionsOf(100), 0);
+        c.sameInt("trace: only the last few connection events are kept", k.recentCount(), 3);
+        if (k.recentCount() == 3) {
+            c.that(
+                "trace: the kept connection events are the latest, oldest first",
+                k.recentAt(0).pid == 303 && k.recentAt(1).pid == 304 && k.recentAt(2).pid == 300
+            );
+            c.that(
+                "trace: the newest kept event is the close",
+                k.recentAt(2).kind == TraceKind::Disconnect
+            );
+        }
+
+        let many : TraceCounters = new TraceCounters(10);
+        for (p of 0..1000) {
+            many.add(traceDecode(10, traceV4(p + 1, 10, "1.1.1.1", "10.0.0.2", 443, 50000)));
+        }
+        c.sameInt("trace: the table of processes grows (count)", many.pidCount(), 1000);
+        c.sameInt("trace: the table of processes keeps every count", many.bytesSent(777), 10);
+        c.sameInt("trace: the table of processes keeps the total", many.totalSent(), 10000);
+    }
+
+    /** The counters over name resolutions. */
+    pub(file) static fn names(c : Checks) : void {
+        let r : TraceCounters = new TraceCounters(4);
+        let same : WireBuf = traceDns("api.stripe.com", 0, "52.1.2.3;");
+        let other : WireBuf = traceDns("cdn.example", 0, "52.1.2.3;");
+        r.add(DnsClient::decode(3008, 10, same.array(), same.size()));
+        r.add(DnsClient::decode(3008, 10, same.array(), same.size()));
+        r.add(DnsClient::decode(3008, 11, other.array(), other.size()));
+        c.sameInt("trace: a name is kept once for each process and address", r.resolvedCount(), 2);
+        c.sameText(
+            "trace: the latest answer names the address",
+            r.nameFor(traceAddr("52.1.2.3")),
+            "cdn.example"
+        );
+        c.sameText(
+            "trace: an address nobody resolved has no name",
+            r.nameFor(traceAddr("9.9.9.9")),
+            ""
+        );
+        c.sameInt("trace: resolutions are in the order seen", r.resolvedAt(0).pid, 10);
+        c.sameInt("trace: a resolution is not a process that moved bytes", r.pidCount(), 0);
+        c.sameInt("trace: resolutions are counted as events", r.eventsSeen(), 3);
+    }
+
+    /** What a start can say before any trace runs. */
+    pub(file) static fn start(c : Checks) : void {
+        let state : SupportState = NetTrace::canStart().state;
+        c.that(
+            "trace: can it start: an admin right, or not at all on a platform without one",
+            state == SupportState::NeedsPrivilege || state == SupportState::Unsupported
+        );
+
+        let gone : Unsupported = new Unsupported("net.trace", "linux", "no eBPF");
+        let off : ReadingStatus = NetTrace::unavailable(gone);
+        c.that(
+            "trace: an unsupported start is off for good",
+            !off.capable && off.state == ReadingState::Off
+        );
+        let denied : Denied = new Denied("net.trace", "the session", Privilege::Elevated, 5);
+        let refused : ReadingStatus = NetTrace::refused(denied);
+        c.that(
+            "trace: a refused start is off but could be lifted",
+            refused.capable && refused.state == ReadingState::Off
+        );
+    }
+}
+
+/** The address written as `s`; the unspecified address when it is not one. */
+fn traceAddr(s : string) : Addr {
+    try {
+        return Addr::parse(s);
+    } catch e : Invalid {
+        return Addr::none();
+    }
+    return Addr::none();
+}
+
+/** A Kernel-Network IPv4 payload: pid, size, destination, source, destination port, source port, 16 spare. */
+fn traceV4(pid : i64, size : i64, dest : string, src : string, dport : i32, sport : i32) : WireBuf {
+    let b : WireBuf = new WireBuf();
+    b.le32(pid);
+    b.le32(size);
+    b.addr(traceAddr(dest), 4);
+    b.addr(traceAddr(src), 4);
+    b.be16(dport);
+    b.be16(sport);
+    b.zeros(16);
+    return b;
+}
+
+/** A Kernel-Network IPv6 payload, laid out like the IPv4 one with sixteen-byte addresses. */
+fn traceV6(pid : i64, size : i64, dest : string, src : string, dport : i32, sport : i32) : WireBuf {
+    let b : WireBuf = new WireBuf();
+    b.le32(pid);
+    b.le32(size);
+    b.addr(traceAddr(dest), 16);
+    b.addr(traceAddr(src), 16);
+    b.be16(dport);
+    b.be16(sport);
+    b.zeros(16);
+    return b;
+}
+
+/** The event that Kernel-Network event `id` with payload `b` reports. */
+fn traceDecode(id : i32, b : WireBuf) : TraceEvent {
+    return KernelNet::decode(id, b.array(), b.size());
+}
+
+/** A DNS-Client "query completed" payload: name, type, options, status, results. */
+fn traceDns(name : string, status : i64, results : string) : WireBuf {
+    let b : WireBuf = new WireBuf();
+    b.wide(name);
+    b.le32(1);
+    b.le64(0);
+    b.le32(status);
+    b.wide(results);
+    return b;
+}
