@@ -1,0 +1,33 @@
+// sys/netsys — the network, on Windows: the IP helper's tables.
+//
+// Sockets are `GetExtendedTcpTable` and `GetExtendedUdpTable` in their owner-pid classes, once per
+// family: the one call that says which process owns each socket. The offsets are the ones netaudit
+// already reads in production. Adapters are `GetAdaptersAddresses` (unicast addresses only), with the
+// 64-bit byte counters from `GetIfEntry2`. Routes are `GetIpForwardTable`, which is IPv4 only: IPv6
+// routes are not listed on Windows by this slice (LIMITATIONS.md).
+//
+// Every table is asked for with a buffer that grows until the system stops saying it was too small,
+// because sockets and adapters appear between the size query and the read. The reading itself is in
+// `nettables`.
+
+use crate::core::error::SysError;
+use crate::core::netinfo::{SocketTable, IfaceTable, RouteTable};
+use crate::sys::nettables::NetTables;
+
+/** The network. */
+pub class NetSys {
+    /** Every TCP and UDP socket, with its owner. */
+    pub static fn sockets() : SocketTable ! SysError {
+        return NetTables::sockets();
+    }
+
+    /** Every network adapter, with its unicast addresses and its byte counters. */
+    pub static fn interfaces() : IfaceTable ! SysError {
+        return NetTables::interfaces();
+    }
+
+    /** The IPv4 routing table. */
+    pub static fn routes() : RouteTable ! SysError {
+        return NetTables::routes(NetTables::interfaces());
+    }
+}

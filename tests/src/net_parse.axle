@@ -1,0 +1,295 @@
+// net_parse — checks for the readers of /proc/net/{tcp,tcp6,udp,udp6,route,ipv6_route,dev}.
+//
+// The lines are real ones, as Linux writes them, given to the readers as text: the rules of the layout are
+// checked on any machine, with no file read. The address words are the in-memory bytes of /proc/net/tcp
+// (127.0.0.1 is 0100007F) and plain bytes in /proc/net/ipv6_route.
+
+use gesso::DevRow;
+use gesso::Values;
+use gesso::{Addr, IfaceKind, Invalid, NetText, Proto, RouteTable, Scan, SocketInfo, SocketScan};
+use gesso::{SocketTable, TcpState};
+
+use crate::checks::Checks;
+
+/** The header of /proc/net/tcp. */
+fn npTcpHead() : string {
+    return "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt"
+        + "   uid  timeout inode\r\n";
+}
+
+/** The address in `text`; the unspecified one when it cannot be read. */
+fn npA(text : string) : Addr {
+    try {
+        return Addr::parse(text);
+    } catch e : Invalid {
+        return Addr::none();
+    }
+}
+
+/** The sockets of `text` read as `proto`. */
+fn npScan(text : string, proto : Proto) : SocketScan {
+    let scan : SocketScan = new SocketScan();
+    NetText::sockets(text, proto, scan);
+    return scan;
+}
+
+/** The IPv4 routes of `text`. */
+fn npRoutes4(text : string) : RouteTable {
+    let t : RouteTable = new RouteTable();
+    NetText::routes4(text, t);
+    return t;
+}
+
+/** The IPv6 routes of `text`. */
+fn npRoutes6(text : string) : RouteTable {
+    let t : RouteTable = new RouteTable();
+    NetText::routes6(text, t);
+    return t;
+}
+
+/** The position of the interface called `name` among `rows`, or -1. */
+fn npRowOf(rows : Values<DevRow>, name : string) : i32 {
+    for (i of 0..rows.size()) {
+        if (rows.at(i).name == name) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/** The readers of the files of /proc/net. */
+pub class NetParseSuite {
+    /** Runs every check of the suite. */
+    pub static fn run(c : Checks) : void {
+        NetParseSuite::tcp(c);
+        NetParseSuite::tcp6(c);
+        NetParseSuite::udp(c);
+        NetParseSuite::junk(c);
+        NetParseSuite::route(c);
+        NetParseSuite::route6(c);
+        NetParseSuite::dev(c);
+        NetParseSuite::small(c);
+    }
+
+    /** /proc/net/tcp. */
+    static fn tcp(c : Checks) : void {
+        let text : string = npTcpHead()
+            + "   0: 0100007F:0035 00000000:0000 0A 00000000:00000000 00:00000000 00000000   "
+            + "101        0 12345 1 0000000000000000 100 0 0 10 0\n"
+            + "   1: 0F02000A:C7E8 142AC15B:01BB 01 00000000:00000000 02:000A7214 00000000  "
+            + "1000        0 67890 2 0000000000000000 20 4 30 10 -1\n"
+            + "   2: 0F02000A:C7EA 142AC15B:01BB 06 00000000:00000000 03:00001700 00000000     "
+            + "0        0 0 3 0000000000000000\n";
+        let scan : SocketScan = npScan(text, Proto::Tcp);
+        let t : SocketTable = scan.table;
+        c.sameInt("net_parse: three rows, the header skipped", t.size(), 3);
+        c.sameInt("net_parse: inodes ride along, as many as rows", scan.inodes.size(), 3);
+        c.sameInt("net_parse: first inode", scan.inodes.at(0), 12345);
+        c.sameInt("net_parse: second inode", scan.inodes.at(1), 67890);
+        c.sameInt("net_parse: third inode", scan.inodes.at(2), 0);
+        let r0 : SocketInfo = t.at(0);
+        let r1 : SocketInfo = t.at(1);
+        let r2 : SocketInfo = t.at(2);
+        c.sameText("net_parse: a loopback listener", r0.local.text(), "127.0.0.1:53");
+        c.that("net_parse: it listens, with no peer", r0.isListening() && r0.remote.isEmpty());
+        c.sameText("net_parse: local of a connection", r1.local.text(), "10.0.2.15:51176");
+        c.sameText("net_parse: remote of a connection", r1.remote.text(), "91.193.42.20:443");
+        c.that("net_parse: established", r1.state == TcpState::Established);
+        c.that("net_parse: time wait", r2.state == TcpState::TimeWait);
+        c.that("net_parse: the process is not known yet", r0.pid == -1 && !r0.hasOwner());
+        c.that(
+            "net_parse: the user is, the file says it",
+            r0.uid == 101 && r1.uid == 1000 && r2.uid == 0
+        );
+        c.sameText("net_parse: owner label", r0.ownerLabel(), "user 101");
+        c.sameText("net_parse: describe", r0.describe(), "tcp 127.0.0.1:53 listening (user 101)");
+        c.that(
+            "net_parse: an external peer is told from an internal one",
+            r1.isExternal() && !r0.isExternal()
+        );
+    }
+
+    /** /proc/net/tcp6. */
+    static fn tcp6(c : Checks) : void {
+        let text : string = ""
+            + "  sl  local_address                         remote_address                        st "
+            + "tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+            + "   0: 00000000000000000000000001000000:0016 00000000000000000000000000000000:0000 0A "
+            + "00000000:00000000 00:00000000 00000000     0        0 4242 1 0000000000000000 100 0 "
+            + "0 10 0\n"
+            + "   1: 0000000000000000FFFF00000F02000A:1F90 0000000000000000FFFF00000100000A:C350 01 "
+            + "00000000:00000000 00:00000000 00000000  1000        0 4343 1 0000000000000000 100 0 "
+            + "0 10 0\n";
+        let t : SocketTable = npScan(text, Proto::Tcp).table;
+        c.sameInt("net_parse: two v6 rows", t.size(), 2);
+        c.sameText("net_parse: a v6 loopback listener", t.at(0).local.text(), "[::1]:22");
+        c.sameText(
+            "net_parse: a mapped local prints as v4",
+            t.at(1).local.text(),
+            "10.0.2.15:8080"
+        );
+        c.sameText(
+            "net_parse: a mapped remote prints as v4",
+            t.at(1).remote.text(),
+            "10.0.0.1:50000"
+        );
+    }
+
+    /** /proc/net/udp. */
+    static fn udp(c : Checks) : void {
+        let text : string = ""
+            + "   sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  "
+            + "timeout inode ref pointer drops\n"
+            + "  100: 00000000:0044 00000000:0000 07 00000000:00000000 00:00000000 00000000     "
+            + "0        0 555 2 0000000000000000 0\n";
+        let t : SocketTable = npScan(text, Proto::Udp).table;
+        c.sameInt("net_parse: one datagram socket", t.size(), 1);
+        c.that("net_parse: a datagram socket has no state", t.at(0).state == TcpState::Open);
+        c.sameText("net_parse: its address", t.at(0).local.text(), "0.0.0.0:68");
+        c.sameText("net_parse: describe", t.at(0).describe(), "udp 0.0.0.0:68 open (user 0)");
+    }
+
+    /** Lines that are not rows. */
+    static fn junk(c : Checks) : void {
+        let scan : SocketScan = npScan("zzz\n1: nothex:zz 0:0 xx 0 0 0 0 0 5\n\n", Proto::Tcp);
+        c.sameInt("net_parse: garbage lines are skipped, not trusted", scan.table.size(), 0);
+        c.sameInt("net_parse: an empty file is no row", npScan("", Proto::Tcp).table.size(), 0);
+    }
+
+    /** /proc/net/route. */
+    static fn route(c : Checks) : void {
+        let text : string = ""
+            + "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n"
+            + "eth0\t00000000\t0102000A\t0003\t0\t0\t100\t00000000\t0\t0\t0\n"
+            + "eth0\t0002000A\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0\n"
+            + "docker0\t000011AC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0\n"
+            + "eth1\t0000FEA9\t00000000\t0000\t0\t0\t1000\t0000FFFF\t0\t0\t0\n";
+        let rt : RouteTable = npRoutes4(text);
+        c.sameInt("net_parse: down routes are left out", rt.size(), 3);
+        c.that("net_parse: the default route", rt.at(0).isDefault());
+        c.sameText("net_parse: its gateway", rt.at(0).gateway.text(), "10.0.2.1");
+        c.sameText("net_parse: its interface", rt.at(0).ifName, "eth0");
+        c.sameInt("net_parse: its metric", rt.at(0).metric, 100);
+        c.sameText("net_parse: a network", rt.at(1).dest.text(), "10.0.2.0");
+        c.sameInt("net_parse: a mask becomes /24", rt.at(1).prefix, 24);
+        c.that("net_parse: on link", rt.at(1).onLink());
+        c.sameInt("net_parse: a mask becomes /16", rt.at(2).prefix, 16);
+        c.sameText(
+            "net_parse: describe default",
+            rt.at(0).describe(),
+            "default via 10.0.2.1 dev eth0 metric 100"
+        );
+        c.sameText(
+            "net_parse: describe a network",
+            rt.at(1).describe(),
+            "10.0.2.0/24 dev eth0 metric 100"
+        );
+        c.sameInt(
+            "net_parse: the longest prefix wins",
+            rt.at(rt.indexFor(npA("10.0.2.77"))).prefix,
+            24
+        );
+        c.that(
+            "net_parse: the rest goes by default",
+            rt.at(rt.indexFor(npA("8.8.8.8"))).isDefault()
+        );
+        c.sameText(
+            "net_parse: 172.17 goes to docker",
+            rt.at(rt.indexFor(npA("172.17.0.5"))).ifName,
+            "docker0"
+        );
+        c.sameInt("net_parse: no route for the other family", rt.indexFor(npA("::1")), -1);
+        c.that("net_parse: no v6 route either", !rt.reaches(npA("2001:db8::1")));
+        c.sameText("net_parse: default gateway", rt.defaultGateway(4).text(), "10.0.2.1");
+        c.that("net_parse: no v6 default gateway", rt.defaultGateway(6).isUnspecified());
+        c.sameInt(
+            "net_parse: a header alone is no route",
+            npRoutes4("Iface\tDestination\n").size(),
+            0
+        );
+    }
+
+    /** /proc/net/ipv6_route. */
+    static fn route6(c : Checks) : void {
+        let text : string = ""
+            + "00000000000000000000000000000000 00 00000000000000000000000000000000 00 "
+            + "fe800000000000000000000000000001 00000400 00000001 00000000 00000003 eth0\n"
+            + "fe800000000000000000000000000000 40 00000000000000000000000000000000 00 "
+            + "00000000000000000000000000000000 00000100 00000001 00000000 00000001 eth0\n"
+            + "00000000000000000000000000000001 80 00000000000000000000000000000000 00 "
+            + "00000000000000000000000000000000 00000000 00000003 00000000 80200001 lo\n";
+        let r6 : RouteTable = npRoutes6(text);
+        c.sameInt("net_parse: three v6 routes", r6.size(), 3);
+        c.that("net_parse: the default route", r6.at(0).isDefault());
+        c.sameText(
+            "net_parse: its gateway, in plain byte order",
+            r6.at(0).gateway.text(),
+            "fe80::1"
+        );
+        c.sameInt("net_parse: its metric is hexadecimal", r6.at(0).metric, 1024);
+        c.sameInt("net_parse: a prefix is hexadecimal", r6.at(1).prefix, 64);
+        c.sameText("net_parse: its interface", r6.at(2).ifName, "lo");
+        c.sameInt(
+            "net_parse: an address follows its route",
+            r6.at(r6.indexFor(npA("fe80::5"))).prefix,
+            64
+        );
+        c.sameText("net_parse: the v6 default gateway", r6.defaultGateway(6).text(), "fe80::1");
+    }
+
+    /** /proc/net/dev. */
+    static fn dev(c : Checks) : void {
+        let text : string = ""
+            + "Inter-|   Receive                                                |  Transmit\n"
+            + " face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets "
+            + "errs drop fifo colls carrier compressed\n"
+            + "    lo:  123456     100    0    0    0     0          0         0   123456     "
+            + "100    0    0    0     0       0          0\n"
+            + "  eth0: 9876543210  70000    0    0    0     0          0         5  1234567890   "
+            + "50000    0    0    0     0       0          0\n";
+        let rows : Values<DevRow> = NetText::devRows(text);
+        c.sameInt("net_parse: two interfaces", rows.size(), 2);
+        c.sameText("net_parse: the first name", rows.at(0).name, "lo");
+        c.sameText("net_parse: the second name", rows.at(1).name, "eth0");
+        c.sameInt("net_parse: received", rows.at(1).rx, 9876543210);
+        c.sameInt("net_parse: sent", rows.at(1).tx, 1234567890);
+        c.sameInt("net_parse: loopback received", rows.at(0).rx, 123456);
+        c.sameInt("net_parse: an interface that is not there", npRowOf(rows, "wlan0"), -1);
+        c.sameInt("net_parse: a prefix of a name is not a row", npRowOf(rows, "eth"), -1);
+    }
+
+    /** The small readers the others lean on. */
+    static fn small(c : Checks) : void {
+        c.sameInt("net_parse: a number in a short file", Scan::number("1500\n"), 1500);
+        c.sameInt("net_parse: a negative one is no number", Scan::number("-1\n"), -1);
+        c.sameInt("net_parse: a word is no number", Scan::number("up\n"), -1);
+        c.sameText("net_parse: a line without its newline", Scan::line("aa:bb\n"), "aa:bb");
+        c.that(
+            "net_parse: kinds of link",
+            NetText::kindOf(772, false, false) == IfaceKind::Loopback
+                && NetText::kindOf(1, true, false) == IfaceKind::Wifi
+                && NetText::kindOf(1, false, true) == IfaceKind::Virtual
+                && NetText::kindOf(1, false, false) == IfaceKind::Ethernet
+                && NetText::kindOf(65534, false, false) == IfaceKind::Other
+        );
+        c.sameInt("net_parse: prefix of /20", NetText::prefixOf(npA("255.255.240.0")), 20);
+        c.sameInt("net_parse: prefix of /0", NetText::prefixOf(npA("0.0.0.0")), 0);
+        c.sameInt("net_parse: prefix of /32", NetText::prefixOf(npA("255.255.255.255")), 32);
+        c.that(
+            "net_parse: a path under virtual",
+            Scan::has("../../devices/virtual/net/lo", "/virtual/")
+                && !Scan::has("../../devices/pci0000:00/net/eth0", "/virtual/")
+        );
+        c.that("net_parse: an empty needle is everywhere", Scan::has("abc", ""));
+        c.that("net_parse: a longer needle is nowhere", !Scan::has("ab", "abc"));
+        c.sameInt("net_parse: a socket inode", NetText::socketInode("socket:[12345]"), 12345);
+        c.sameInt("net_parse: a pipe is no socket", NetText::socketInode("pipe:[12345]"), -1);
+        c.sameInt("net_parse: a device is no socket", NetText::socketInode("/dev/null"), -1);
+        c.sameInt("net_parse: no number in the brackets", NetText::socketInode("socket:[]"), -1);
+        c.sameInt(
+            "net_parse: a bad number in the brackets",
+            NetText::socketInode("socket:[12a]"),
+            -1
+        );
+    }
+}

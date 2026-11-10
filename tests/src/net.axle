@@ -1,0 +1,493 @@
+// net — checks for addresses, endpoints, sockets, interfaces, routes and the rates of traffic.
+//
+// Everything here is built from values in hand: the text of an address, the rows of a table, the counters of
+// an interface. Nothing asks the machine for a fact that differs from one machine to the next, so the suite
+// holds on any of them; `NetSuite::sanity` states only what is true of every machine. The parsers of the
+// files of /proc/net are in net_parse.
+
+use gesso::{Addr, AddrKind, Endpoint, Invalid, IfaceInfo, IfaceKind, IfaceTable, LinkInfo};
+use gesso::{Net, Proto, RouteInfo, RouteTable, SocketInfo, SocketTable, TcpState, TrafficMeter};
+
+use crate::checks::Checks;
+
+/** The address in `text` written back, or "invalid" when it cannot be read. */
+fn netPrint(text : string) : string {
+    try {
+        return Addr::parse(text).text();
+    } catch e : Invalid {
+        return "invalid";
+    }
+}
+
+/** The kind of the address in `text`, as its label. */
+fn netKindOf(text : string) : string {
+    try {
+        return Addr::parse(text).kind().label();
+    } catch e : Invalid {
+        return "invalid";
+    }
+}
+
+/** The address in `text`; the unspecified one when it cannot be read (a check on it then fails by itself). */
+fn netA(text : string) : Addr {
+    try {
+        return Addr::parse(text);
+    } catch e : Invalid {
+        return Addr::none();
+    }
+}
+
+/** Whether `text` is an address of `kind`. */
+fn netIs(text : string, kind : AddrKind) : bool {
+    return netA(text).kind() == kind;
+}
+
+/** The endpoint `text`:`port`. */
+fn netEp(text : string, port : i32) : Endpoint {
+    return new Endpoint(netA(text), port);
+}
+
+/** An interface reading with the counters `rx` and `tx`. */
+fn netReading(rx : i64, tx : i64) : IfaceTable {
+    let t : IfaceTable = new IfaceTable();
+    let e : IfaceInfo = new IfaceInfo(2, "eth0", "Ethernet");
+    e.traffic(rx, tx);
+    t.add(e);
+    return t;
+}
+
+/** A TCP socket read between two endpoints. */
+fn netTcp(
+    own local : Endpoint,
+    own remote : Endpoint,
+    state : TcpState,
+    pid : i64,
+    uid : i64
+) : SocketInfo {
+    return new SocketInfo(Proto::Tcp, local, remote, state, pid, uid);
+}
+
+/** The addresses, sockets, interfaces, routes and rates checks. */
+pub class NetSuite {
+    /** Runs every check of the suite. */
+    pub static fn run(c : Checks) : void {
+        NetSuite::text(c);
+        NetSuite::refused(c);
+        NetSuite::kinds(c);
+        NetSuite::equality(c);
+        NetSuite::subnets(c);
+        NetSuite::endpoints(c);
+        NetSuite::sockets(c);
+        NetSuite::narrowing(c);
+        NetSuite::routes(c);
+        NetSuite::interfaces(c);
+        NetSuite::rates(c);
+        NetSuite::sanity(c);
+    }
+
+    /** Reading an address and printing it back. */
+    static fn text(c : Checks) : void {
+        c.sameText("net: v4", netPrint("192.168.1.20"), "192.168.1.20");
+        c.sameText("net: v4 zeros", netPrint("0.0.0.0"), "0.0.0.0");
+        c.sameText("net: v4 ones", netPrint("255.255.255.255"), "255.255.255.255");
+        c.sameText("net: v6 unspecified", netPrint("::"), "::");
+        c.sameText("net: v6 loopback", netPrint("::1"), "::1");
+        c.sameText("net: v6 short", netPrint("2001:db8::1"), "2001:db8::1");
+        c.sameText(
+            "net: v6 long form shortens",
+            netPrint("2001:0db8:0000:0000:0000:0000:0000:0001"),
+            "2001:db8::1"
+        );
+        c.sameText(
+            "net: v6 link-local",
+            netPrint("fe80::1ff:fe23:4567:890a"),
+            "fe80::1ff:fe23:4567:890a"
+        );
+        c.sameText(
+            "net: the longest run of zeros is shortened",
+            netPrint("1:0:0:2:0:0:0:3"),
+            "1:0:0:2::3"
+        );
+        c.sameText("net: v6 full", netPrint("1:2:3:4:5:6:7:8"), "1:2:3:4:5:6:7:8");
+        c.sameText(
+            "net: a single zero group stays",
+            netPrint("1:0:3:4:5:6:7:8"),
+            "1:0:3:4:5:6:7:8"
+        );
+        c.sameText(
+            "net: mapped keeps its dotted tail",
+            netPrint("::ffff:10.0.0.1"),
+            "::ffff:10.0.0.1"
+        );
+        c.sameText("net: upper case prints lower", netPrint("ABCD::EF"), "abcd::ef");
+        c.sameText("net: trailing gap", netPrint("2001:db8:0:0:1::"), "2001:db8:0:0:1::");
+    }
+
+    /** Text that is not an address. */
+    static fn refused(c : Checks) : void {
+        let bad : string[] = [
+            "",
+            "1.2.3",
+            "1.2.3.4.5",
+            "256.1.1.1",
+            "1..2.3",
+            "a.b.c.d",
+            "1:2:3",
+            "1::2::3",
+            ":1",
+            "1:",
+            "12345::",
+            "g::1",
+            "::1.2.3",
+            "1:2:3:4:5:6:7:8:9",
+            "1.2.3.4:80",
+        ];
+        for (i of 0..15) {
+            c.sameText("net: refuses \"${bad[i as i64]}\"", netPrint(bad[i as i64]), "invalid");
+        }
+    }
+
+    /** What an address is for. */
+    static fn kinds(c : Checks) : void {
+        c.that("net: 0.0.0.0 is unspecified", netIs("0.0.0.0", AddrKind::Unspecified));
+        c.that("net: 127.0.0.1 is loopback", netIs("127.0.0.1", AddrKind::Loopback));
+        c.that("net: 10/8 is private", netIs("10.1.2.3", AddrKind::Private));
+        c.that("net: 172.16 is private", netIs("172.16.0.1", AddrKind::Private));
+        c.that("net: 172.32 is public", netIs("172.32.0.1", AddrKind::Public));
+        c.that("net: 192.168 is private", netIs("192.168.5.5", AddrKind::Private));
+        c.that("net: 169.254 is link-local", netIs("169.254.1.1", AddrKind::LinkLocal));
+        c.that("net: 224 is multicast", netIs("224.0.0.251", AddrKind::Multicast));
+        c.that("net: 8.8.8.8 is public", netIs("8.8.8.8", AddrKind::Public));
+        c.that("net: 100.64 is private", netIs("100.64.0.1", AddrKind::Private));
+        c.that("net: :: is unspecified", netIs("::", AddrKind::Unspecified));
+        c.that("net: ::1 is loopback", netIs("::1", AddrKind::Loopback));
+        c.that("net: fe80 is link-local", netIs("fe80::1", AddrKind::LinkLocal));
+        c.that("net: fd00 is private", netIs("fd00::1", AddrKind::Private));
+        c.that("net: ff02 is multicast", netIs("ff02::1", AddrKind::Multicast));
+        c.that("net: a global v6 is public", netIs("2606:4700::1111", AddrKind::Public));
+        c.that("net: a mapped loopback is loopback", netIs("::ffff:127.0.0.1", AddrKind::Loopback));
+        c.that("net: a mapped public is public", netIs("::ffff:8.8.8.8", AddrKind::Public));
+        c.sameText("net: label of a kind", netKindOf("169.254.1.1"), "link-local");
+        c.that(
+            "net: public is not internal",
+            !AddrKind::Public.isInternal() && AddrKind::Private.isInternal()
+        );
+    }
+
+    /** When two addresses are the same one. */
+    static fn equality(c : Checks) : void {
+        let mapped : Addr = netA("::ffff:1.2.3.4");
+        c.that("net: a mapped address equals its v4 form", mapped.equals(netA("1.2.3.4")));
+        c.that("net: other addresses differ", !netA("1.2.3.4").equals(netA("1.2.3.5")));
+        c.that("net: keys follow equality", mapped.key() == netA("1.2.3.4").key());
+        c.that("net: keys tell addresses apart", netA("1.2.3.4").key() != netA("1.2.3.5").key());
+        c.that("net: v4n and v4 agree", Addr::v4n(0x01020304).equals(Addr::v4(1, 2, 3, 4)));
+        c.sameInt("net: width of v4", Addr::v4(1, 2, 3, 4).width(), 4);
+        c.sameInt("net: width of v6", netA("::1").width(), 16);
+        c.that("net: unmapped gives the v4 form", mapped.unmapped().isV4() && mapped.isMapped());
+    }
+
+    /** Membership of a network. */
+    static fn subnets(c : Checks) : void {
+        let net : Addr = netA("192.168.0.0");
+        c.that("net: inside /16", netA("192.168.77.1").inSubnet(net, 16));
+        c.that("net: outside /16", !netA("192.169.0.1").inSubnet(net, 16));
+        c.that("net: inside /24", netA("192.168.0.1").inSubnet(net, 24));
+        c.that("net: /9 inside", netA("10.130.0.1").inSubnet(netA("10.128.0.0"), 9));
+        c.that("net: /9 outside", !netA("10.127.0.1").inSubnet(netA("10.128.0.0"), 9));
+        c.that("net: /0 holds its family", netA("1.2.3.4").inSubnet(Addr::none(), 0));
+        c.that("net: /0 holds no other family", !netA("::1").inSubnet(Addr::none(), 0));
+        c.that("net: v6 inside", netA("2001:db8:1::5").inSubnet(netA("2001:db8::"), 32));
+        c.that("net: v6 outside", !netA("2001:db9::5").inSubnet(netA("2001:db8::"), 32));
+        c.sameInt("net: byte 0", netA("1.2.3.4").byteAt(0), 1);
+        c.sameInt("net: byte 3", netA("1.2.3.4").byteAt(3), 4);
+        c.sameInt("net: v6 byte 1", netA("102:304::").byteAt(1), 2);
+        c.sameInt("net: v6 group", netA("102:304::").groupAt(1), 0x304);
+    }
+
+    /** An address and a port. */
+    static fn endpoints(c : Checks) : void {
+        c.sameText("net: endpoint v4", netEp("10.0.0.2", 443).text(), "10.0.0.2:443");
+        c.sameText("net: endpoint v6", netEp("::1", 80).text(), "[::1]:80");
+        c.sameText("net: endpoint without a port", netEp("1.2.3.4", 0).text(), "1.2.3.4");
+        c.sameText(
+            "net: a mapped endpoint prints as v4",
+            netEp("::ffff:1.2.3.4", 80).text(),
+            "1.2.3.4:80"
+        );
+        c.that("net: the empty endpoint", Endpoint::none().isEmpty());
+        c.that("net: a port alone is not empty", !netEp("0.0.0.0", 80).isEmpty());
+        c.that("net: endpoint keys", netEp("1.2.3.4", 80).key() != netEp("1.2.3.4", 81).key());
+    }
+
+    /** One socket: what it says of itself. */
+    static fn sockets(c : Checks) : void {
+        let listen : SocketInfo = netTcp(
+            netEp("127.0.0.1", 53),
+            Endpoint::none(),
+            TcpState::Listen,
+            -1,
+            101
+        );
+        let conn : SocketInfo = netTcp(
+            netEp("10.0.2.15", 51176),
+            netEp("91.193.42.20", 443),
+            TcpState::Established,
+            4120,
+            1000
+        );
+        let other : SocketInfo = netTcp(
+            netEp("10.0.2.15", 51178),
+            netEp("91.193.42.20", 443),
+            TcpState::TimeWait,
+            4120,
+            0
+        );
+        let dgram : SocketInfo = new SocketInfo(
+            Proto::Udp,
+            netEp("0.0.0.0", 68),
+            Endpoint::none(),
+            TcpState::Open,
+            -1,
+            0
+        );
+        c.that("net: a listener", listen.isListening() && listen.remote.isEmpty());
+        c.that("net: a connection is not a listener", !conn.isListening());
+        c.that(
+            "net: an external peer is told from an internal one",
+            conn.isExternal() && !listen.isExternal()
+        );
+        c.sameText(
+            "net: describe a listener whose process is out of sight",
+            listen.describe(),
+            "tcp 127.0.0.1:53 listening (user 101)"
+        );
+        c.sameText(
+            "net: describe a connection",
+            conn.describe(),
+            "tcp 10.0.2.15:51176 → 91.193.42.20:443 established (pid 4120)"
+        );
+        c.sameText(
+            "net: describe a datagram socket",
+            dgram.describe(),
+            "udp 0.0.0.0:68 open (user 0)"
+        );
+        c.sameText("net: owner by pid", conn.ownerLabel(), "pid 4120");
+        c.sameText("net: owner by user", listen.ownerLabel(), "user 101");
+        c.that("net: owner known", conn.hasOwner() && !listen.hasOwner() && listen.hasUser());
+        let nobody : SocketInfo = netTcp(netEp("::1", 1), Endpoint::none(), TcpState::Open, -1, -1);
+        c.sameText("net: no owner at all", nobody.ownerLabel(), "unknown");
+        c.that("net: same flow, same key", conn.key == conn.copy().key && conn.key != other.key);
+        c.that("net: live states", TcpState::Established.isLive() && !TcpState::TimeWait.isLive());
+        c.that(
+            "net: linux state numbers",
+            TcpState::fromLinux(10) == TcpState::Listen
+                && TcpState::fromLinux(1) == TcpState::Established
+        );
+        c.that(
+            "net: windows state numbers",
+            TcpState::fromWindows(2) == TcpState::Listen
+                && TcpState::fromWindows(99) == TcpState::Open
+        );
+        c.sameText("net: a state in a sentence", TcpState::TimeWait.label(), "time wait");
+        c.sameText("net: a transport in a word", Proto::Udp.label(), "udp");
+    }
+
+    /** Tables of sockets narrow by what the rows say. */
+    static fn narrowing(c : Checks) : void {
+        let full : SocketTable = new SocketTable();
+        full.add(netTcp(netEp("127.0.0.1", 53), Endpoint::none(), TcpState::Listen, 100, 101));
+        full.add(netTcp(
+            netEp("10.0.2.15", 51176),
+            netEp("91.193.42.20", 443),
+            TcpState::Established,
+            4120,
+            1000
+        ));
+        full.add(netTcp(
+            netEp("10.0.2.15", 51178),
+            netEp("91.193.42.20", 443),
+            TcpState::TimeWait,
+            4120,
+            0
+        ));
+        full.add(new SocketInfo(
+            Proto::Udp,
+            netEp("0.0.0.0", 68),
+            Endpoint::none(),
+            TcpState::Open,
+            -1,
+            0
+        ));
+        c.sameInt("net: by owner", full.ofPid(4120).size(), 2);
+        c.sameInt("net: by an absent owner", full.ofPid(7).size(), 0);
+        c.sameInt("net: listening", full.listening().size(), 1);
+        c.sameInt("net: by state", full.inState(TcpState::TimeWait).size(), 1);
+        c.sameInt("net: by transport", full.ofProto(Proto::Udp).size(), 1);
+        c.sameInt("net: by port", full.onPort(53).size(), 1);
+        c.sameInt(
+            "net: narrowing chains",
+            full.ofPid(4120).inState(TcpState::Established).size(),
+            1
+        );
+        c.sameInt("net: external", full.external().size(), 2);
+        c.sameInt("net: the peer", full.peerIs(netA("91.193.42.20")).size(), 2);
+        c.sameInt("net: by user", full.ofUser(0).size(), 2);
+        c.sameInt("net: unowned", full.unowned(), 1);
+        c.sameInt("net: without owner", full.withoutOwner().size(), 1);
+        let owners : i64[] = full.owners();
+        c.that(
+            "net: distinct owners, in the order met",
+            owners.length == 2 && owners[0 as i64] == 100 && owners[1 as i64] == 4120
+        );
+        c.that("net: narrowing copies rows", full.listening().at(0).key == full.at(0).key);
+        full.setOwner(3, 9);
+        c.sameInt("net: setOwner", full.at(3).pid, 9);
+        c.sameInt("net: setOwner leaves the rest", full.unowned(), 0);
+        let big : SocketTable = new SocketTable();
+        for (i of 0..300) {
+            big.add(full.at(0));
+        }
+        c.sameInt("net: the table grows past its first room", big.size(), 300);
+    }
+
+    /** The routing table and its longest-prefix lookup. */
+    static fn routes(c : Checks) : void {
+        let rt : RouteTable = new RouteTable();
+        rt.add(new RouteInfo(Addr::none(), 0, netA("10.0.2.1"), 2, "eth0", 100));
+        rt.add(new RouteInfo(netA("10.0.2.0"), 24, Addr::none(), 2, "eth0", 100));
+        rt.add(new RouteInfo(netA("172.17.0.0"), 16, Addr::none(), 3, "docker0", 0));
+        rt.add(new RouteInfo(netA("10.0.2.0"), 24, Addr::none(), 4, "eth1", 50));
+        c.that("net: the default route", rt.at(0).isDefault() && !rt.at(1).isDefault());
+        c.that("net: on link", rt.at(1).onLink() && !rt.at(0).onLink());
+        c.sameText(
+            "net: describe default",
+            rt.at(0).describe(),
+            "default via 10.0.2.1 dev eth0 metric 100"
+        );
+        c.sameText(
+            "net: describe a network",
+            rt.at(1).describe(),
+            "10.0.2.0/24 dev eth0 metric 100"
+        );
+        c.sameInt(
+            "net: the longest prefix wins",
+            rt.at(rt.indexFor(netA("172.17.0.5"))).prefix,
+            16
+        );
+        c.sameText(
+            "net: 172.17 goes to docker",
+            rt.at(rt.indexFor(netA("172.17.0.5"))).ifName,
+            "docker0"
+        );
+        c.that("net: the rest goes by default", rt.at(rt.indexFor(netA("8.8.8.8"))).isDefault());
+        c.sameText(
+            "net: the lowest metric among equals",
+            rt.at(rt.indexFor(netA("10.0.2.77"))).ifName,
+            "eth1"
+        );
+        c.sameInt("net: no route for the other family", rt.indexFor(netA("::1")), -1);
+        c.that("net: reaches", rt.reaches(netA("1.1.1.1")) && !rt.reaches(netA("2001:db8::1")));
+        c.sameText("net: default gateway", rt.defaultGateway(4).text(), "10.0.2.1");
+        c.that("net: no v6 default gateway", rt.defaultGateway(6).isUnspecified());
+        c.sameInt("net: default index", rt.defaultIndex(4), 0);
+        c.sameInt("net: no v6 default index", rt.defaultIndex(6), -1);
+        c.that(
+            "net: a route covers only its network",
+            rt.at(2).covers(netA("172.17.9.9")) && !rt.at(2).covers(netA("172.18.0.1"))
+        );
+        let copy : RouteInfo = rt.at(0).copy();
+        c.that("net: a copy is the same route", copy.describe() == rt.at(0).describe());
+    }
+
+    /** Interfaces and the lists of them. */
+    static fn interfaces(c : Checks) : void {
+        let ifc : IfaceInfo = new IfaceInfo(2, "eth0", "Ethernet");
+        ifc.link(LinkInfo {
+            mac: "aa:bb:cc:dd:ee:ff",
+            kind: IfaceKind::Ethernet,
+            up: true,
+            mtu: 1500,
+            speedBps: 1000000000,
+        });
+        for (i of 0..6) {
+            ifc.addAddress(netA("fe80::${i + 1}"), 64);
+        }
+        ifc.addAddress(netA("10.0.2.15"), 24);
+        c.sameInt("net: addresses grow", ifc.addressCount(), 7);
+        c.sameText("net: addresses keep their order", ifc.addrAt(0).text(), "fe80::1");
+        c.sameInt("net: prefix of the last", ifc.prefixAt(6), 24);
+        c.sameText("net: first v4", ifc.firstV4().text(), "10.0.2.15");
+        c.that("net: no v4", new IfaceInfo(1, "x", "x").firstV4().isUnspecified());
+        c.that("net: holds", ifc.holds(netA("10.0.2.15")) && !ifc.holds(netA("10.0.2.16")));
+        c.that("net: reaches", ifc.reaches(netA("10.0.2.99")) && !ifc.reaches(netA("10.0.3.1")));
+        c.that("net: link fields", ifc.up && ifc.mtu == 1500 && ifc.speedBps == 1000000000);
+        c.sameText("net: the hardware address", ifc.mac, "aa:bb:cc:dd:ee:ff");
+        let twin : IfaceInfo = ifc.copy();
+        c.that("net: a copy keeps the addresses", twin.addressCount() == 7 && twin.mtu == 1500);
+        c.that("net: a copy keeps the key", twin.key == ifc.key);
+        ifc.traffic(2048, 1024);
+        c.sameText(
+            "net: describe",
+            ifc.describe(),
+            "Ethernet (ethernet, up) 10.0.2.15 rx 2.0 KiB tx 1.0 KiB"
+        );
+
+        let tab : IfaceTable = new IfaceTable();
+        let lo : IfaceInfo = new IfaceInfo(1, "lo", "lo");
+        lo.link(LinkInfo { kind: IfaceKind::Loopback, up: true, mtu: 65536 });
+        tab.add(lo);
+        let ifcKey : i64 = ifc.key;
+        tab.add(ifc);
+        c.sameInt("net: find by name, capitals apart", tab.find("ETH0"), 1);
+        c.sameInt("net: find by label", tab.find("ethernet"), 1);
+        c.sameInt("net: find nothing", tab.find("zz"), -1);
+        c.sameInt("net: by index", tab.byIndex(2), 1);
+        c.sameInt("net: holding an address", tab.holding(netA("10.0.2.15")), 1);
+        c.sameInt("net: the loopback is no way out", tab.upCount(), 1);
+        c.that("net: an interface keeps its key", new IfaceInfo(9, "eth0", "x").key == ifcKey);
+        c.sameText("net: kind label", IfaceKind::Wifi.label(), "wi-fi");
+    }
+
+    /** Bytes per second between two readings. */
+    static fn rates(c : Checks) : void {
+        let m : TrafficMeter = new TrafficMeter();
+        m.sample(netReading(1000, 500), 10000);
+        c.that(
+            "net: the first reading has nothing to compare",
+            m.rxPerSecond("eth0") == 0 && m.rxTotal() == 0
+        );
+        m.sample(netReading(1000 + 2000000, 500 + 500000), 12000);
+        c.sameInt("net: rx per second", m.rxPerSecond("eth0"), 1000000);
+        c.sameInt("net: tx per second", m.txPerSecond("eth0"), 250000);
+        c.sameInt("net: rx total", m.rxTotal(), 1000000);
+        c.sameInt("net: tx total", m.txTotal(), 250000);
+        m.sample(netReading(100, 100), 13000);
+        c.that(
+            "net: a counter that went back is no measurement",
+            m.rxPerSecond("eth0") == 0 && m.txPerSecond("eth0") == 0
+        );
+        m.sample(netReading(100, 100), 13000);
+        c.sameInt("net: no time passed, no rate", m.rxPerSecond("eth0"), 0);
+        c.sameInt("net: an unknown interface is 0", m.rxPerSecond("wlan9"), 0);
+    }
+
+    /** What is true of every machine, whatever its network. */
+    static fn sanity(c : Checks) : void {
+        try {
+            let all : SocketTable = Net::sockets();
+            c.that("net: unowned sockets are at most all of them", all.unowned() <= all.size());
+            c.that("net: listeners are a part", all.listening().size() <= all.size());
+        } catch e : Exception {
+            c.that("net: sockets read (${e.message})", false);
+        }
+        try {
+            let ifaces : IfaceTable = Net::interfaces();
+            c.that("net: the machine has an interface", ifaces.size() > 0);
+            let sum : (rx: i64, tx: i64) = Net::totals();
+            c.that("net: counters are never negative", sum.rx >= 0 && sum.tx >= 0);
+        } catch e : Exception {
+            c.that("net: interfaces read (${e.message})", false);
+        }
+    }
+}

@@ -1,0 +1,204 @@
+// net — the machine's network: its sockets, its interfaces, its routes, and the questions people ask of them.
+//
+//     let online : bool = Net::isOnline();
+//     let mine : Addr = Net::localAddress();                       // the address traffic leaves from
+//     let open : SocketTable = Net::sockets().listening();         // who waits for a connection
+//     let theirs : SocketTable = Net::sockets().ofPid(4120).external();
+//     let way : RouteInfo = Net::routeTo(Addr::parse("8.8.8.8"));  // and which interface it takes
+//
+// Everything here only looks (`Access::Read`) and needs no privilege, with one limit that is the system's
+// and not this library's: the owner of a socket can be seen for the caller's own processes everywhere,
+// and for every process only from an elevated session on Linux (Windows says it to everyone). A socket
+// whose owner cannot be seen has `pid` -1; `SocketTable::unowned()` counts them.
+
+use crate::core::asinfo::{AsOrigin, Cymru};
+use crate::core::dnsinfo::DnsCache;
+use crate::core::dnswire::Arpa;
+use crate::core::error::{SysError, Absent, Invalid};
+use crate::core::netaddr::Addr;
+use crate::core::netinfo::{SocketTable, IfaceInfo, IfaceTable, IfaceKind, RouteInfo, RouteTable};
+use crate::core::privilege::Privilege;
+use crate::core::reading::ReadingStatus;
+use crate::core::support::Support;
+use crate::sys::dnssys::DnsSys;
+use crate::sys::netsys::NetSys;
+use crate::sys::os::Os;
+
+/** The network. */
+pub class Net {
+    /** Every TCP and UDP socket on the machine. */
+    pub static fn sockets() : SocketTable ! SysError {
+        return NetSys::sockets();
+    }
+
+    /**
+     * What the table of sockets read: on when every socket has its owning process, *partial* when some have
+     * none. On Linux a user who is not elevated sees the process of their own sockets only; the others still
+     * say which user owns them (`uid`) and are kept in the table, but their `pid` is -1. The note says how
+     * many, and what would show the rest, so that a display can say it too instead of dropping them.
+     */
+    pub static fn socketsStatus(table : SocketTable) : ReadingStatus {
+        let n : i32 = table.unowned();
+        if (n == 0) {
+            return ReadingStatus::on(
+                "connection tables",
+                table.size().toString() + " sockets, every owner visible"
+            );
+        }
+        let why : string = Os::privilege() == Privilege::User
+            && Os::name()
+                == "linux" ? "an elevated session sees every process's sockets; the others still name their user" : "the system did not name their owner";
+        return ReadingStatus::partial(
+            "connection tables",
+            n.toString() + " of " + table.size().toString() + " sockets have no visible owning process: "
+                + why
+        );
+    }
+
+    /** The sockets one process owns. */
+    pub static fn socketsOf(pid : i64) : SocketTable ! SysError {
+        return NetSys::sockets().ofPid(pid);
+    }
+
+    /** Every network interface, with its addresses and its counters. */
+    pub static fn interfaces() : IfaceTable ! SysError {
+        return NetSys::interfaces();
+    }
+
+    /** The routing table. */
+    pub static fn routes() : RouteTable ! SysError {
+        return NetSys::routes();
+    }
+
+    /** The route the system would use to reach `addr`; `Absent` when no route covers it. */
+    pub static fn routeTo(addr : Addr) : RouteInfo ! SysError {
+        let table : RouteTable = NetSys::routes();
+        let at : i32 = table.indexFor(addr);
+        if (at < 0) {
+            throw Absent("net.routeTo", "route to " + addr.text());
+        }
+        return table.at(at).copy();
+    }
+
+    /** The address of the default gateway (IPv4), or the unspecified address when there is none. */
+    pub static fn gateway() : Addr ! SysError {
+        return NetSys::routes().defaultGateway(4);
+    }
+
+    /** The interface the default IPv4 route leaves by; `Absent` when there is no default route. */
+    pub static fn primary() : IfaceInfo ! SysError {
+        let routes : RouteTable = NetSys::routes();
+        let ifaces : IfaceTable = NetSys::interfaces();
+        let r : i32 = routes.defaultIndex(4);
+        if (r < 0) {
+            throw Absent("net.primary", "default route");
+        }
+        let mut at : i32 = ifaces.byIndex(routes.at(r).ifIndex);
+        if (at < 0) {
+            at = ifaces.find(routes.at(r).ifName);
+        }
+        if (at < 0) {
+            throw Absent("net.primary", "interface " + routes.at(r).ifName);
+        }
+        return ifaces.at(at);
+    }
+
+    /**
+     * The IPv4 address traffic to the internet leaves from, or the unspecified address when the machine has
+     * no way out.
+     */
+    pub static fn localAddress() : Addr ! SysError {
+        try {
+            return Net::primary().firstV4();
+        } catch e : Absent {
+            return Addr::none();
+        }
+    }
+
+    /**
+     * Whether the machine has a default route out through an interface that is up. This is not proof that the
+     * internet answers.
+     */
+    pub static fn isOnline() : bool ! SysError {
+        try {
+            return Net::primary().up;
+        } catch e : Absent {
+            return false;
+        }
+    }
+
+    /**
+     * Bytes received and sent by every interface except the loopback, since each came up: (received, sent).
+     */
+    pub static fn totals() : (rx: i64, tx: i64) ! SysError {
+        let ifaces : IfaceTable = NetSys::interfaces();
+        let mut rx : i64 = 0;
+        let mut tx : i64 = 0;
+        for (i of 0..ifaces.size()) {
+            if (ifaces.at(i).kind != IfaceKind::Loopback) {
+                rx = rx + ifaces.at(i).rxBytes;
+                tx = tx + ifaces.at(i).txBytes;
+            }
+        }
+        return (rx, tx);
+    }
+
+    /**
+     * The names this machine's resolver has cached, with their addresses: what programs on it *asked for*,
+     * which says more than what an address's owner publishes (`cache.nameOf(addr)`). Nothing is sent to the
+     * network. `Unsupported` where the system keeps no cache a program may read (Linux).
+     */
+    pub static fn dnsCache() : DnsCache ! SysError {
+        return DnsSys::cache();
+    }
+
+    /** Whether `dnsCache` can be read here. */
+    pub static fn canReadDnsCache() : Support {
+        if (Os::name() == "linux") {
+            return Support::unsupported("the system resolver keeps no cache a program may read");
+        }
+        return Support::unknown("an undocumented interface: it may refuse, and an empty cache reads like a refusal");
+    }
+
+    /**
+     * The name the owner of `addr` publishes for it (its PTR record). This asks a DNS server and can take
+     * seconds: run it off the thread that draws. `Absent` when there is no such record.
+     */
+    pub static fn reverse(addr : Addr) : string ! SysError {
+        let name : string = DnsSys::reverse(Arpa::name(addr));
+        if (name.byteLength == 0) {
+            throw Absent("net.reverse", "name published for " + addr.text());
+        }
+        return name;
+    }
+
+    /** The text record at `name`, its strings joined. Asks a DNS server; `Absent` when there is none. */
+    pub static fn txt(name : string) : string ! SysError {
+        let text : string = DnsSys::txt(name);
+        if (text.byteLength == 0) {
+            throw Absent("net.txt", "text record at " + name);
+        }
+        return text;
+    }
+
+    /**
+     * The network that announces `addr`, from Team Cymru's DNS zones (two lookups, no key, no TLS). The name
+     * of the network is a second lookup: when only that one fails the answer has the number and no name
+     * (`name` is empty, `title()` shows the number alone). `Absent` when nothing announces the address.
+     */
+    pub static fn origin(addr : Addr) : AsOrigin ! SysError {
+        let answer : string = DnsSys::txt(Cymru::originName(addr));
+        if (answer.byteLength == 0) {
+            throw Absent("net.origin", "network announcing " + addr.text());
+        }
+        let origin : AsOrigin = Cymru::parseOrigin(answer);
+        if (!origin.isKnown()) {
+            throw Invalid("net.origin", answer, "not an origin answer");
+        }
+        try {
+            return Cymru::named(origin, DnsSys::txt(Cymru::asName(origin.asn)));
+        } catch e : SysError {
+            return origin;
+        }
+    }
+}
