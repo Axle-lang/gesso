@@ -1,0 +1,66 @@
+// sys/dnsapi — the dnsapi imports the Windows port uses: the resolver's cache, and one query at a time.
+//
+// `DnsGetCacheDataTable` is not documented. Its record has been the same four fields for twenty years and
+// every tool that reads the cache reads it this way, but "undocumented" means the contract is observed
+// rather than promised, so the reader bounds every walk and treats a refusal as an answer, not a fault.
+
+extern "C" from "dnsapi" {
+    /**
+     * `BOOL DnsGetCacheDataTable(PDNSCACHEENTRY)` — undocumented. The caller passes a zeroed head record and
+     * the list hangs off its `pNext`. FALSE also means "the cache is empty", which is not a failure.
+     */
+    fn DnsGetCacheDataTable(head : ptr) : i32;
+
+    /**
+     * `DNS_STATUS DnsQuery_W(PCWSTR name, WORD type, DWORD options, PVOID extra, PDNS_RECORD *results, PVOID
+     * *reserved)` — 0 on success, and the record list must be released.
+     */
+    fn DnsQuery_W(name : ptr, kind : i32, options : i32, extra : ptr, results : ptr, reserved : ptr) : i32;
+
+    /** `void DnsRecordListFree(PDNS_RECORD, DNS_FREE_TYPE)`. */
+    fn DnsRecordListFree(records : ptr, freeType : i32) : void;
+
+    /** `void DnsFree(PVOID, DNS_FREE_TYPE)` — for the cache table's records and strings. */
+    fn DnsFree(data : ptr, freeType : i32) : void;
+}
+
+// ─── DNSCACHEENTRY (x64; proven by netaudit) ────────
+
+/** `struct _DNS_CACHE_ENTRY *pNext`, `PWSTR pszName`, `unsigned short wType`; 24 bytes. */
+const CACHE_ENTRY : i64 = 24;
+const CACHE_NEXT : i64 = 0;
+const CACHE_NAME : i64 = 8;
+const CACHE_TYPE : i64 = 16;
+
+// ─── DNS_RECORD (x64; proven by netaudit) ────────
+
+/** `DNS_RECORD *pNext`, `WORD wType`, and where the data union starts. */
+const REC_NEXT : i64 = 0;
+const REC_TYPE : i64 = 16;
+const REC_DATA : i64 = 32;
+
+/** In a TXT record the data is `DWORD dwStringCount` and then the array of string pointers, from 40. */
+const REC_TXT_COUNT : i64 = 32;
+const REC_TXT_FIRST : i64 = 40;
+
+/** The record types read here. */
+const DNS_TYPE_A : i32 = 1;
+const DNS_TYPE_PTR : i32 = 12;
+const DNS_TYPE_TEXT : i32 = 16;
+const DNS_TYPE_AAAA : i32 = 28;
+
+/**
+ * `DNS_QUERY_NO_WIRE_QUERY`: answer from the cache or not at all. It is 0x10, and the value matters more
+ * than any other here: 0x100 is `DNS_QUERY_WIRE_ONLY`, the exact opposite, which would send every cached
+ * name back out to the DNS server on each sweep.
+ */
+const DNS_QUERY_NO_WIRE_QUERY : i32 = 0x10;
+
+/** `DnsFreeFlat` (a cache table's records and strings) and `DnsFreeRecordList`. */
+const DNS_FREE_FLAT : i32 = 0;
+const DNS_FREE_RECORD_LIST : i32 = 1;
+
+/** The statuses that mean "there is no such record" rather than "the lookup failed". */
+const DNS_ERROR_RCODE_NAME_ERROR : i32 = 9003;
+const DNS_INFO_NO_RECORDS : i32 = 9501;
+const DNS_ERROR_RECORD_DOES_NOT_EXIST : i32 = 9701;

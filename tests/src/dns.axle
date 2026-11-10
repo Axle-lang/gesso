@@ -1,0 +1,537 @@
+// dns — checks for DNS as data: the zone names, a message read as bytes, Team Cymru's names and answers,
+// the cache turned around, and the reader's status over time.
+//
+// The messages are written out here byte by byte, as a resolver would receive them. What the Python harness
+// ran over a fake machine (`Net::reverse`, `Net::txt`, `Net::origin`, a reader sweeping a cache that the test
+// swaps for a failing one) needs a seam Axle does not have, so it is not here: the pure readers are
+// checked on bytes, and the reader on what every machine agrees on: it has not read anything yet.
+
+use gesso::{
+    Addr, Arpa, AsOrigin, Cymru, Dns, DnsCache, DnsCacheReader, DnsEntry, Invalid, ReadingState,
+    ReadingStatus, Utf16, Utf8
+};
+
+use crate::checks::Checks;
+
+/** A growing run of bytes, for writing a message or a payload out by hand. */
+pub class WireBuf {
+    data : i32[];
+    used : i32 = 0;
+
+    /** An empty run with room for 4096 bytes. */
+    constructor() {
+        self.data = new i32[4096];
+    }
+
+    /** How many bytes there are. */
+    pub fn size(self) : i32 {
+        return self.used;
+    }
+
+    /** The bytes, as an array of exactly that many. */
+    pub fn array(self) : i32[] {
+        let mut out : i32[] = new i32[self.used];
+        for (i of 0..self.used) {
+            out[i as i64] = self.data[i as i64];
+        }
+        return out;
+    }
+
+    /** Add one byte. */
+    pub fn byte(mut self, b : i32) : void {
+        self.data[self.used as i64] = b & 255;
+        self.used = self.used + 1;
+    }
+
+    /** Add a 16-bit number, most significant byte first. */
+    pub fn be16(mut self, v : i32) : void {
+        self.byte(v >> 8);
+        self.byte(v);
+    }
+
+    /** Add a 32-bit number, most significant byte first. */
+    pub fn be32(mut self, v : i64) : void {
+        self.byte(((v >> 24) & 255) as i32);
+        self.byte(((v >> 16) & 255) as i32);
+        self.byte(((v >> 8) & 255) as i32);
+        self.byte((v & 255) as i32);
+    }
+
+    /** Add a 16-bit number, least significant byte first. */
+    pub fn le16(mut self, v : i32) : void {
+        self.byte(v);
+        self.byte(v >> 8);
+    }
+
+    /** Add a 32-bit number, least significant byte first. */
+    pub fn le32(mut self, v : i64) : void {
+        self.byte((v & 255) as i32);
+        self.byte(((v >> 8) & 255) as i32);
+        self.byte(((v >> 16) & 255) as i32);
+        self.byte(((v >> 24) & 255) as i32);
+    }
+
+    /** Add a 64-bit number, least significant byte first. */
+    pub fn le64(mut self, v : i64) : void {
+        self.le32(v & 4294967295);
+        self.le32((v >> 32) & 4294967295);
+    }
+
+    /** Add the characters of `s` as they are, one byte each. */
+    pub fn ascii(mut self, s : string) : void {
+        let mut i : i64 = 0;
+        while (i < s.byteLength) {
+            self.byte(s.byteAt(i) as i32);
+            i = i + 1;
+        }
+    }
+
+    /** Add a name as length-prefixed labels and a closing zero: `a.b` is 1 a 1 b 0. */
+    pub fn name(mut self, s : string) : void {
+        let mut start : i64 = 0;
+        let mut i : i64 = 0;
+        while (i <= s.byteLength) {
+            if (i == s.byteLength || s.byteAt(i) == 46) {
+                self.byte((i - start) as i32);
+                let mut k : i64 = start;
+                while (k < i) {
+                    self.byte(s.byteAt(k) as i32);
+                    k = k + 1;
+                }
+                start = i + 1;
+            }
+            i = i + 1;
+        }
+        self.byte(0);
+    }
+
+    /** Add the bytes of the address `a`, `n` of them (4 for IPv4, 16 for IPv6), in network order. */
+    pub fn addr(mut self, a : Addr, n : i32) : void {
+        for (i of 0..n) {
+            self.byte(a.byteAt(i));
+        }
+    }
+
+    /** Add `s` as UTF-16 little-endian units followed by a terminating zero unit. */
+    pub fn wide(mut self, s : string) : void {
+        let units : i32[] = Utf16::encode(s);
+        for (i of 0..Utf16::length(s) + 1) {
+            self.le16(units[i as i64]);
+        }
+    }
+
+    /** Add `n` zero bytes. */
+    pub fn zeros(mut self, n : i32) : void {
+        for (i of 0..n) {
+            self.byte(0);
+        }
+    }
+
+    /** Add every byte of `other`. */
+    pub fn append(mut self, other : WireBuf) : void {
+        for (i of 0..other.used) {
+            self.byte(other.data[i as i64]);
+        }
+    }
+}
+
+/** The DNS checks. */
+pub class DnsSuite {
+    /** Runs every check of the suite. */
+    pub static fn run(c : Checks) : void {
+        DnsSuite::zones(c);
+        DnsSuite::messages(c);
+        DnsSuite::refused(c);
+        DnsSuite::cymru(c);
+        DnsSuite::cache(c);
+        DnsSuite::status(c);
+        DnsSuite::reader(c);
+    }
+
+    /** The reverse zone names. */
+    pub(file) static fn zones(c : Checks) : void {
+        c.sameText(
+            "dns: IPv4 reverse name",
+            Arpa::name(dnsAddr("93.184.216.34")),
+            "34.216.184.93.in-addr.arpa"
+        );
+        c.sameText(
+            "dns: IPv6 reverse name is 32 nibbles, reversed",
+            Arpa::name(dnsAddr("2001:db8::1")),
+            "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa"
+        );
+        c.sameText(
+            "dns: a mapped address is asked for as IPv4",
+            Arpa::name(dnsAddr("::ffff:1.2.3.4")),
+            "4.3.2.1.in-addr.arpa"
+        );
+    }
+
+    /** Reading the answers of a message that is whole. */
+    pub(file) static fn messages(c : Checks) : void {
+        let ptr : WireBuf = dnsMessage("34.216.184.93.in-addr.arpa", 12, 0, 1);
+        dnsRecord(ptr, 12, dnsNameData("example.com"));
+        c.sameText("dns: the first PTR record's target", dnsName(ptr), "example.com");
+
+        let tail : WireBuf = new WireBuf();
+        tail.byte(3);
+        tail.ascii("www");
+        tail.byte(192);
+        tail.byte(12);
+        let p2 : WireBuf = dnsMessage("example.com", 12, 0, 1);
+        dnsRecord(p2, 12, tail);
+        c.sameText(
+            "dns: a name that ends in a pointer is followed",
+            dnsName(p2),
+            "www.example.com"
+        );
+
+        let cym : string = "15133 | 93.184.216.0/24 | US | arin | 2008-06-02";
+        let txt : WireBuf = dnsMessage("x.origin.asn.cymru.com", 16, 0, 1);
+        dnsRecord(txt, 16, dnsStringData(cym));
+        c.sameText("dns: a TXT record's text", dnsText(txt), cym);
+
+        let rd : WireBuf = new WireBuf();
+        rd.byte(5);
+        rd.ascii("hello");
+        rd.byte(6);
+        rd.ascii(" world");
+        let split : WireBuf = dnsMessage("x.example", 16, 0, 1);
+        dnsRecord(split, 16, rd);
+        c.sameText("dns: a TXT record's strings read as one text", dnsText(split), "hello world");
+
+        let mixed : WireBuf = dnsMessage("a.example", 16, 0, 2);
+        dnsRecord(mixed, 5, dnsNameData("alias.example"));
+        dnsRecord(mixed, 16, dnsStringData("ok"));
+        c.sameText("dns: records of another type are skipped (text found)", dnsText(mixed), "ok");
+        c.sameText("dns: records of another type are skipped (name absent)", dnsName(mixed), "");
+
+        let bad : WireBuf = new WireBuf();
+        bad.byte(64);
+        bad.ascii("xxxxx");
+        let badLabel : WireBuf = dnsMessage("a.b", 12, 0, 1);
+        dnsRecord(badLabel, 12, bad);
+        c.sameText("dns: a label with reserved high bits is refused", dnsName(badLabel), "");
+
+        let odd : WireBuf = new WireBuf();
+        odd.byte(3);
+        odd.byte(97);
+        odd.byte(255);
+        odd.byte(98);
+        let nonascii : WireBuf = dnsMessage("a.b", 16, 0, 1);
+        dnsRecord(nonascii, 16, odd);
+        c.sameText("dns: bytes outside printable ASCII become ?", dnsText(nonascii), "a?b");
+    }
+
+    /** Refused, empty, cut short, and circular messages. */
+    pub(file) static fn refused(c : Checks) : void {
+        let nx : WireBuf = dnsMessage("nope.example", 12, 3, 0);
+        c.that("dns: a refused answer is the empty string", dnsName(nx) == "" && dnsText(nx) == "");
+        c.sameText(
+            "dns: an answer with no records is the empty string",
+            dnsName(dnsMessage("a.b", 12, 0, 0)),
+            ""
+        );
+
+        let refusedFull : WireBuf = dnsMessage("a.b", 12, 2, 1);
+        dnsRecord(refusedFull, 12, dnsNameData("x.y"));
+        c.sameText(
+            "dns: a non-zero response code says nothing even if records follow",
+            dnsName(refusedFull),
+            ""
+        );
+
+        c.that(
+            "dns: a message shorter than its header",
+            Dns::firstName(new i32[5], 5) == "" && Dns::firstText(new i32[0], 0) == ""
+        );
+
+        let whole : WireBuf = dnsMessage("34.216.184.93.in-addr.arpa", 12, 0, 1);
+        dnsRecord(whole, 12, dnsNameData("example.com"));
+        c.sameText(
+            "dns: a message cut inside a record",
+            Dns::firstName(whole.array(), whole.size() - 4),
+            ""
+        );
+
+        let claims : WireBuf = dnsMessage("a.b", 12, 0, 7);
+        dnsRecord(claims, 12, dnsNameData("x.y"));
+        c.sameText(
+            "dns: an answer count larger than the data does not run off the end",
+            dnsName(claims),
+            "x.y"
+        );
+
+        // The question's name is a pointer to itself, and so is the answer's data: both must end.
+        let selfName : WireBuf = new WireBuf();
+        selfName.be16(1);
+        selfName.be16(33152);
+        selfName.be16(1);
+        selfName.be16(1);
+        selfName.be32(0);
+        selfName.byte(192);
+        selfName.byte(12);
+        selfName.be16(12);
+        selfName.be16(1);
+        selfName.byte(192);
+        selfName.byte(12);
+        selfName.be16(12);
+        selfName.be16(1);
+        selfName.be32(60);
+        selfName.be16(2);
+        selfName.byte(192);
+        selfName.byte(selfName.size() - 1);
+        c.sameText("dns: a name that points at itself ends", dnsName(selfName), "");
+
+        let loopData : WireBuf = new WireBuf();
+        loopData.byte(192);
+        loopData.byte(12);
+        let pointsBack : WireBuf = dnsMessage("a.b", 12, 0, 1);
+        dnsRecord(pointsBack, 12, loopData);
+        c.sameText(
+            "dns: a name whose pointer is the question's name reads it",
+            dnsName(pointsBack),
+            "a.b"
+        );
+    }
+
+    /** Team Cymru's names and answers. */
+    pub(file) static fn cymru(c : Checks) : void {
+        let v4 : string = Cymru::originName(dnsAddr("10.104.79.160"));
+        let v6 : string = Cymru::originName(dnsAddr("2001:db8::1"));
+        c.sameText("dns: origin name of an IPv4 address", v4, "160.79.104.10.origin.asn.cymru.com");
+        c.that(
+            "dns: origin name of an IPv6 address",
+            dnsEnds(v6, ".origin6.asn.cymru.com") && dnsStarts(v6, "1.0.0.0.")
+        );
+        c.sameText("dns: AS names", Cymru::asName(399358), "AS399358.asn.cymru.com");
+
+        let o : AsOrigin = Cymru::parseOrigin("399358 | 160.79.104.0/23 | US | arin | 2023-09-14");
+        c.sameInt("dns: an origin answer, its number", o.asn, 399358);
+        c.sameText("dns: an origin answer, its prefix", o.prefix, "160.79.104.0/23");
+        c.sameText("dns: an origin answer, its country", o.country, "US");
+        c.sameText("dns: an origin answer, its registry", o.registry, "arin");
+        c.that(
+            "dns: an origin answer is known and titled by its number",
+            o.isKnown() && o.title() == "AS399358"
+        );
+
+        let n : AsOrigin = Cymru::named(
+            o,
+            "399358 | US | arin | 2023-09-20 | ANTHROPIC - Anthropic, PBC, US"
+        );
+        c.sameText("dns: the name from the AS answer", n.name, "ANTHROPIC - Anthropic, PBC, US");
+        c.sameText(
+            "dns: the title with its name",
+            n.title(),
+            "AS399358 ANTHROPIC - Anthropic, PBC, US"
+        );
+        c.sameInt("dns: the name keeps the number", n.asn, 399358);
+
+        c.sameInt(
+            "dns: several networks: the first",
+            Cymru::parseOrigin("7018 3356 | 4.0.0.0/9 | US | arin | 2000-01-01").asn,
+            7018
+        );
+        c.that(
+            "dns: an answer nobody can read is not known",
+            !Cymru::parseOrigin("").isKnown() && !Cymru::parseOrigin("garbage").isKnown()
+        );
+        c.sameInt(
+            "dns: more than nine digits is no number",
+            Cymru::parseOrigin("12345678901 | x").asn,
+            0
+        );
+        let trimmed : AsOrigin = Cymru::parseOrigin("  15133  |  93.184.216.0/24  |US|arin|");
+        c.sameText("dns: fields are trimmed (country)", trimmed.country, "US");
+        c.sameText("dns: fields are trimmed (prefix)", trimmed.prefix, "93.184.216.0/24");
+    }
+
+    /** The resolver's cache, inverted. */
+    pub(file) static fn cache(c : Checks) : void {
+        let dc : DnsCache = new DnsCache(true);
+        dc.add(new DnsEntry("api.stripe.com", dnsAddr("52.1.2.3")));
+        dc.add(new DnsEntry("api.stripe.com", dnsAddr("52.1.2.4")));
+        dc.add(new DnsEntry("cdn.example.net", dnsAddr("52.1.2.3")));
+        dc.add(new DnsEntry("CDN.example.net", dnsAddr("52.1.2.3")));
+        dc.add(new DnsEntry("v6.example", dnsAddr("2001:db8::7")));
+
+        c.sameText(
+            "dns: an address's name is the first one cached",
+            dc.nameOf(dnsAddr("52.1.2.3")),
+            "api.stripe.com"
+        );
+        c.sameText("dns: an IPv6 address's name", dc.nameOf(dnsAddr("2001:db8::7")), "v6.example");
+        c.sameText(
+            "dns: an address nobody asked for has no name",
+            dc.nameOf(dnsAddr("9.9.9.9")),
+            ""
+        );
+        c.that(
+            "dns: knows says whether there is a name",
+            dc.knows(dnsAddr("52.1.2.4")) && !dc.knows(dnsAddr("9.9.9.9"))
+        );
+
+        let names : string[] = dc.namesOf(dnsAddr("52.1.2.3"));
+        c.sameInt("dns: every name for it, once each, case ignored (count)", names.length, 2);
+        if (names.length == 2) {
+            c.that(
+                "dns: every name for it, in the order cached",
+                names[0 as i64] == "api.stripe.com" && names[1 as i64] == "cdn.example.net"
+            );
+        }
+
+        let addrs : Addr[] = dc.addressesOf("API.STRIPE.COM");
+        c.sameInt("dns: a name's addresses, capitals not told apart (count)", addrs.length, 2);
+        if (addrs.length == 2) {
+            c.that(
+                "dns: a name's addresses, in the order cached",
+                addrs[0 as i64].text() == "52.1.2.3" && addrs[1 as i64].text() == "52.1.2.4"
+            );
+        }
+        c.sameInt(
+            "dns: a name nobody asked for has no addresses",
+            dc.addressesOf("nope").length,
+            0
+        );
+        c.sameText(
+            "dns: an IPv4-mapped address finds the IPv4 name",
+            dc.nameOf(dnsAddr("::ffff:52.1.2.4")),
+            "api.stripe.com"
+        );
+
+        let silent : DnsCache = new DnsCache(false);
+        c.that(
+            "dns: a reading says whether the system answered",
+            dc.answered() && !silent.answered() && silent.size() == 0
+        );
+        c.sameInt("dns: the cache holds what was added", dc.size(), 5);
+
+        let big : DnsCache = new DnsCache(true);
+        for (i of 0..300) {
+            big.add(new DnsEntry("n" + i.toString(), Addr::v4(10, 0, i / 250, i % 250 + 1)));
+        }
+        c.sameInt("dns: the cache grows (size)", big.size(), 300);
+        c.sameText("dns: the cache grows (a late name)", big.nameOf(Addr::v4(10, 0, 1, 1)), "n250");
+    }
+
+    /** What a reading status says. */
+    pub(file) static fn status(c : Checks) : void {
+        c.that("dns: on is on", ReadingStatus::on("dns cache", "x").isOn());
+        c.that("dns: off is not on", !ReadingStatus::off("dns cache", "x").isOn());
+        c.that(
+            "dns: lost is the Lost state",
+            ReadingStatus::lost("dns cache", "x").state == ReadingState::Lost
+        );
+        c.that(
+            "dns: a platform without it is not capable",
+            !ReadingStatus::unavailable("kernel trace", "no").capable
+        );
+        c.that(
+            "dns: a refusal that a privilege would lift is capable",
+            ReadingStatus::off("kernel trace", "needs admin").capable
+        );
+        c.sameText(
+            "dns: describe an on reading",
+            ReadingStatus::on("dns cache", "reading it").describe(),
+            "dns cache: on — reading it"
+        );
+        c.sameText(
+            "dns: describe a lost reading",
+            ReadingStatus::lost("dns cache", "empty").describe(),
+            "dns cache: lost — empty"
+        );
+    }
+
+    /** The reader, before and after one sweep of whatever machine this is. */
+    pub(file) static fn reader(c : Checks) : void {
+        let rd : DnsCacheReader = new DnsCacheReader(5000);
+        c.that(
+            "dns: before a sweep nothing is read and it says so",
+            !rd.status().isOn() && rd.status().note == "not read yet"
+        );
+        c.sameText("dns: before a sweep there is no name", rd.nameOf(dnsAddr("52.1.2.3")), "");
+        c.that("dns: before a sweep one is due", rd.due(0));
+        rd.sweep(1000);
+        c.that(
+            "dns: after a sweep it is not due until the interval has passed",
+            !rd.due(5999) && rd.due(6000)
+        );
+        c.that(
+            "dns: after a sweep the status is no longer 'not read yet'",
+            rd.status().note != "not read yet"
+        );
+    }
+}
+
+/** The address written as `s`; the unspecified address when it is not one. */
+fn dnsAddr(s : string) : Addr {
+    try {
+        return Addr::parse(s);
+    } catch e : Invalid {
+        return Addr::none();
+    }
+    return Addr::none();
+}
+
+/** Whether `s` begins with `head`. */
+fn dnsStarts(s : string, head : string) : bool {
+    return s.byteLength >= head.byteLength && Utf8::slice(s, 0, head.byteLength) == head;
+}
+
+/** Whether `s` ends with `tail`. */
+fn dnsEnds(s : string, tail : string) : bool {
+    return s.byteLength >= tail.byteLength
+        && Utf8::slice(s, s.byteLength - tail.byteLength, s.byteLength) == tail;
+}
+
+/** A response with one question; `count` answers are to be added with `dnsRecord`. */
+fn dnsMessage(qname : string, qtype : i32, rcode : i32, count : i32) : WireBuf {
+    let b : WireBuf = new WireBuf();
+    b.be16(4660);
+    b.be16(33152 | rcode);
+    b.be16(1);
+    b.be16(count);
+    b.be16(0);
+    b.be16(0);
+    b.name(qname);
+    b.be16(qtype);
+    b.be16(1);
+    return b;
+}
+
+/** Add an answer of `rtype` whose owner is a pointer to the question's name, with `rdata`. */
+fn dnsRecord(b : WireBuf, rtype : i32, rdata : WireBuf) : void {
+    b.byte(192);
+    b.byte(12);
+    b.be16(rtype);
+    b.be16(1);
+    b.be32(60);
+    b.be16(rdata.size());
+    b.append(rdata);
+}
+
+/** `s` as the data of a PTR or CNAME record. */
+fn dnsNameData(s : string) : WireBuf {
+    let b : WireBuf = new WireBuf();
+    b.name(s);
+    return b;
+}
+
+/** `s` as the data of a TXT record of one string. */
+fn dnsStringData(s : string) : WireBuf {
+    let b : WireBuf = new WireBuf();
+    b.byte(s.byteLength as i32);
+    b.ascii(s);
+    return b;
+}
+
+/** The first PTR target of `m`. */
+fn dnsName(m : WireBuf) : string {
+    return Dns::firstName(m.array(), m.size());
+}
+
+/** The first TXT text of `m`. */
+fn dnsText(m : WireBuf) : string {
+    return Dns::firstText(m.array(), m.size());
+}
