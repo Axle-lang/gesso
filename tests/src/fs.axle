@@ -1,0 +1,456 @@
+// fs — checks for files and volumes as data: paths, modes, mounts, space, entry lists and the change queue.
+//
+// The pure parts are fed rows built by hand. `Fs` itself is run against the real disk, on a folder made under
+// the temp directory for the purpose and removed at the end; the checks that need the machine to answer in a
+// particular way (a fake disk) have no counterpart here, since Axle has no seam to substitute.
+
+use std::io::{FileOutputStream, FileOpenMode};
+use std::io::path::Path;
+use std::lang::IOException;
+use std::sys::tempDir;
+
+use gesso::{
+    Fs, FsChange, ChangeKind, ChangeQueue, ChangeFeed, DirEntry, EntryKind, EntryList, FileStat,
+    Mode, MountText, PathText, Scan, SpaceInfo, SysError, Gone, Invalid, TreeSize, VolumeInfo,
+    VolumeKind, VolumeTable, WatchState, FsWatcher, SupportState, Os, Plan
+};
+
+use crate::checks::Checks;
+
+/** The mount table the parsing checks read: a mix of real and system-only mounts. */
+fn fsMountText() : string {
+    return "sysfs /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0\n"
+        + "proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0\n"
+        + "/dev/nvme0n1p2 / ext4 rw,relatime 0 0\n"
+        + "tmpfs /run tmpfs rw,nosuid,nodev,size=1618048k,mode=755 0 0\n"
+        + "/dev/sda1 /media/user/My\\040Stick vfat rw,nosuid,nodev,relatime 0 0\n"
+        + "server:/export /mnt/nas nfs4 rw,relatime 0 0\n"
+        + "//host/share /mnt/win cifs rw 0 0\n"
+        + "/dev/sr0 /media/cdrom iso9660 ro 0 0\n"
+        + "/dev/loop3 /snap/core/1 squashfs ro 0 0\n";
+}
+
+/** A file of `size` bytes at `path`. */
+fn fsWriteFile(path : string, size : i32) : void ! IOException {
+    let bytes : i8[] = new i8[size];
+    let out = new FileOutputStream(path, FileOpenMode::WRITE);
+    out.writeBytes(bytes, 0, size);
+    out.close();
+}
+
+/** Removes `path` if it is there; a miss is not a problem. */
+fn fsRemove(path : string) : void {
+    try {
+        Path::from(path).delete();
+    } catch e : IOException {
+        return;
+    }
+}
+
+/** Whether `Fs::stat` of `path` is refused as `Gone`. */
+fn fsIsGone(path : string) : bool {
+    try {
+        Fs::stat(path);
+    } catch e : Gone {
+        return true;
+    } catch e : SysError {
+        return false;
+    }
+    return false;
+}
+
+/** Whether `text` holds `part`. */
+fn fsHas(text : string, part : string) : bool {
+    return Scan::has(text, part);
+}
+
+/** The suite of files and volumes. */
+pub class FsSuite {
+    /** Runs every check of the suite. */
+    pub static fn run(c : Checks) : void {
+        fsModeChecks(c);
+        fsMountChecks(c);
+        fsHoldingChecks(c);
+        fsSpaceChecks(c);
+        fsEntryChecks(c);
+        fsPathChecks(c);
+        fsQueueChecks(c);
+        fsFeedChecks(c);
+        fsRealChecks(c);
+    }
+}
+
+fn fsModeChecks(c : Checks) : void {
+    c.sameText("fs: 755 reads as rwxr-xr-x", Mode::text(493), "rwxr-xr-x");
+    c.sameText("fs: 644 reads as rw-r--r--", Mode::text(420), "rw-r--r--");
+    c.sameText("fs: 0 reads as dashes", Mode::text(0), "---------");
+    c.sameText("fs: 777 reads as rwxrwxrwx", Mode::text(511), "rwxrwxrwx");
+    c.that("fs: the owner writes with 644", Mode::ownerWrites(420));
+    c.that("fs: the owner does not write with 444", !Mode::ownerWrites(292));
+    c.sameInt("fs: withWrite(755, false) clears every write bit", Mode::withWrite(493, false), 365);
+    c.sameInt("fs: withWrite(444, true) sets the owner bit", Mode::withWrite(292, true), 420);
+    c.sameInt("fs: withWrite(644, true) leaves it", Mode::withWrite(420, true), 420);
+}
+
+fn fsMountChecks(c : Checks) : void {
+    let vt : VolumeTable = new VolumeTable();
+    MountText::parse(fsMountText(), false, vt);
+    c.sameInt("fs: virtual mounts are left out by default", vt.size(), 6);
+    c.sameText("fs: first root", vt.at(0).root, "/");
+    c.sameText("fs: tmpfs root", vt.at(1).root, "/run");
+    c.sameText("fs: an escaped space in a mount point", vt.at(2).root, "/media/user/My Stick");
+    c.sameText("fs: nfs root", vt.at(3).root, "/mnt/nas");
+    c.sameText("fs: cifs root", vt.at(4).root, "/mnt/win");
+    c.sameText("fs: optical root", vt.at(5).root, "/media/cdrom");
+    c.that("fs: ext4 is a fixed disk", vt.at(0).kind == VolumeKind::Fixed);
+    c.that("fs: tmpfs is memory", vt.at(1).kind == VolumeKind::Ram);
+    c.that("fs: vfat is a fixed disk", vt.at(2).kind == VolumeKind::Fixed);
+    c.that("fs: nfs4 is network", vt.at(3).kind == VolumeKind::Network);
+    c.that("fs: cifs is network", vt.at(4).kind == VolumeKind::Network);
+    c.that("fs: iso9660 is optical", vt.at(5).kind == VolumeKind::Optical);
+    c.sameText("fs: the device of a mount", vt.at(2).device, "/dev/sda1");
+    c.sameText("fs: the file system of a mount", vt.at(2).fsType, "vfat");
+    let every : VolumeTable = new VolumeTable();
+    MountText::parse(fsMountText(), true, every);
+    c.sameInt("fs: all keeps the virtual ones", every.size(), 9);
+    c.sameText("fs: the title falls back to the root", vt.at(0).title(), "/");
+    c.sameText(
+        "fs: unescape a space and a backslash",
+        MountText::unescape("a\\040b\\134c"),
+        "a b\\c"
+    );
+    c.sameText("fs: unescape leaves plain text", MountText::unescape("plain"), "plain");
+    c.sameText("fs: unescape leaves a cut escape", MountText::unescape("end\\04"), "end\\04");
+    c.that("fs: a dot file is hidden", MountText::isHidden(".bashrc"));
+    c.that("fs: a plain name is not hidden", !MountText::isHidden("a.txt"));
+    c.that("fs: . is not hidden", !MountText::isHidden("."));
+    c.that("fs: .. is not hidden", !MountText::isHidden(".."));
+    c.that("fs: proc is virtual", MountText::kindOf("proc") == VolumeKind::Virtual);
+    c.that("fs: squashfs is virtual", MountText::kindOf("squashfs") == VolumeKind::Virtual);
+    c.that("fs: sshfs is network", MountText::kindOf("fuse.sshfs") == VolumeKind::Network);
+    c.sameText("fs: a kind has a name", VolumeKind::Optical.label(), "optical");
+}
+
+fn fsHoldingChecks(c : Checks) : void {
+    let vt : VolumeTable = new VolumeTable();
+    MountText::parse(fsMountText(), false, vt);
+    let stick : i32 = vt.holding("/media/user/My Stick/photos/a.jpg");
+    c.sameText("fs: the longest root that holds a path", vt.at(stick).root, "/media/user/My Stick");
+    c.sameText("fs: the root holds the rest", vt.at(vt.holding("/home/me")).root, "/");
+    c.sameText("fs: a root is a folder boundary", vt.at(vt.holding("/runner/x")).root, "/");
+    c.sameText("fs: a root holds itself", vt.at(vt.holding("/run")).root, "/run");
+    c.sameText("fs: a root holds what is below it", vt.at(vt.holding("/run/user/1")).root, "/run");
+    let wv : VolumeTable = new VolumeTable();
+    wv.add(new VolumeInfo("C:\\", "", "System", "NTFS", VolumeKind::Fixed));
+    wv.add(new VolumeInfo("D:\\", "", "", "exFAT", VolumeKind::Removable));
+    c.sameInt("fs: a drive letter ignores case", wv.holding("c:\\Users\\me"), 0);
+    c.sameInt("fs: the second drive", wv.holding("D:\\x"), 1);
+    c.sameInt("fs: no drive holds it", wv.holding("E:\\x"), -1);
+    c.sameText("fs: the title is the label when there is one", wv.at(0).title(), "System");
+    c.sameText("fs: the title is the root when there is no label", wv.at(1).title(), "D:\\");
+    c.sameText("fs: a volume in a line", wv.at(0).describe(), "System  NTFS (disk)");
+}
+
+fn fsSpaceChecks(c : Checks) : void {
+    let sp : SpaceInfo = new SpaceInfo(1000, 400, 350);
+    c.sameInt("fs: space used", sp.used(), 600);
+    c.sameInt("fs: space full in tenths", sp.fullTenths(), 631);
+    c.sameInt("fs: a volume of nothing is not full", new SpaceInfo(0, 0, 0).fullTenths(), 0);
+}
+
+fn fsEntryChecks(c : Checks) : void {
+    let el : EntryList = new EntryList();
+    for (i of 0..40) {
+        let name : string = "f" + i.toString();
+        el.add(new DirEntry(name, new FileStat("/d/" + name, EntryKind::File, 10, 0, 420, false)));
+    }
+    el.add(new DirEntry("sub", new FileStat("/d/sub", EntryKind::Dir, 4096, 0, 493, false)));
+    el.add(new DirEntry("ln", new FileStat("/d/ln", EntryKind::Link, 7, 0, 511, false)));
+    c.sameInt("fs: a list grows", el.size(), 42);
+    c.sameInt("fs: find the last file", el.find("f39"), 39);
+    c.sameInt("fs: find the folder", el.find("sub"), 40);
+    c.sameInt("fs: find nothing", el.find("zz"), -1);
+    c.sameInt("fs: folders counted", el.folders(), 1);
+    c.sameInt("fs: only files add bytes", el.bytes(), 400);
+    let st : FileStat = new FileStat("/d/x", EntryKind::File, 5, 1000, 292, true);
+    let same : FileStat = new FileStat("/d/x", EntryKind::File, 99, 5, 420, false);
+    let other : FileStat = new FileStat("/d/y", EntryKind::File, 5, 1000, 292, true);
+    c.that("fs: read-only comes from the mode", st.readOnly);
+    c.that("fs: hidden is kept", st.hidden);
+    c.that("fs: a file is not a folder", !st.isDir() && !st.isLink());
+    c.that("fs: keys follow the path", same.key == st.key);
+    c.that("fs: another path another key", other.key != st.key);
+    c.sameText("fs: an entry in a line", el.at(0).describe(), "f0  file  10 B  rw-r--r--");
+    c.sameText("fs: a list in a line", el.describe(), "42 entries, 1 folders, 400 B in files");
+}
+
+fn fsPathChecks(c : Checks) : void {
+    c.sameText("fs: join adds a separator", PathText::join("/a", "b", "/"), "/a/b");
+    c.sameText("fs: join keeps one that is there", PathText::join("/a/", "b", "/"), "/a/b");
+    c.sameText("fs: join after a drive root", PathText::join("C:\\", "x", "\\"), "C:\\x");
+    c.sameText(
+        "fs: join after a folder on a drive",
+        PathText::join("C:\\d", "x", "\\"),
+        "C:\\d\\x"
+    );
+    c.sameText("fs: leaf of a slash path", PathText::leaf("/a/b/c.txt"), "c.txt");
+    c.sameText("fs: leaf of a backslash path", PathText::leaf("C:\\a\\b"), "b");
+    c.sameText("fs: leaf of a bare name", PathText::leaf("name"), "name");
+    c.that("fs: a regular file mode", EntryKind::fromMode(33188) == EntryKind::File);
+    c.that("fs: a folder mode", EntryKind::fromMode(16877) == EntryKind::Dir);
+    c.that("fs: a link mode", EntryKind::fromMode(41471) == EntryKind::Link);
+    c.that("fs: a pipe mode", EntryKind::fromMode(4516) == EntryKind::Other);
+    c.sameText("fs: a kind has a name", EntryKind::Dir.label(), "folder");
+}
+
+fn fsQueueChecks(c : Checks) : void {
+    let q : ChangeQueue = new ChangeQueue();
+    for (i of 0..100) {
+        q.push(ChangeKind::Created, "n" + i.toString());
+    }
+    c.sameInt("fs: the queue grows past its room", q.count(), 100);
+    c.sameText("fs: first in", q.pop().name, "n0");
+    c.sameText("fs: second in", q.pop().name, "n1");
+    for (i of 0..40) {
+        q.push(ChangeKind::Deleted, "m" + i.toString());
+    }
+    let mut order : string[] = new string[138];
+    let mut n : i32 = 0;
+    while (!q.isEmpty()) {
+        order[n as i64] = q.pop().name;
+        n = n + 1;
+    }
+    c.sameInt("fs: nothing is lost when it wraps", n, 138);
+    c.sameText("fs: the old ones come first", order[0 as i64], "n2");
+    c.sameText("fs: the last old one", order[97 as i64], "n99");
+    c.sameText("fs: then the new ones", order[98 as i64], "m0");
+    c.sameText("fs: the newest is last", order[137 as i64], "m39");
+    let kinds : ChangeKind[] = [
+        ChangeKind::Created,
+        ChangeKind::Deleted,
+        ChangeKind::Modified,
+        ChangeKind::RenamedFrom,
+        ChangeKind::RenamedTo,
+    ];
+    let mut kept : i32 = 0;
+    for (i of 0..5) {
+        let one : ChangeQueue = new ChangeQueue();
+        one.push(kinds[i as i64], "x");
+        if (one.pop().kind == kinds[i as i64]) {
+            kept = kept + 1;
+        }
+    }
+    c.sameInt("fs: every kind survives the queue", kept, 5);
+    c.sameText("fs: an empty pop is harmless", new ChangeQueue().pop().name, "");
+    let made : FsChange = new FsChange(ChangeKind::Created, "new.txt");
+    c.sameText("fs: a change in a line", made.describe(), "created new.txt");
+    c.that(
+        "fs: an unknown kind number is a modification",
+        ChangeKind::at(9) == ChangeKind::Modified
+    );
+}
+
+fn fsFeedChecks(c : Checks) : void {
+    let feed : ChangeFeed = new ChangeFeed();
+    c.that("fs: a new feed is open and idle", feed.isOpen() && feed.standing() == WatchState::Idle);
+    feed.queue.push(ChangeKind::Created, "new.txt");
+    feed.queue.push(ChangeKind::Modified, "a.txt");
+    feed.queue.push(ChangeKind::Deleted, "old.txt");
+    c.that(
+        "fs: with changes it is ready",
+        feed.standing() == WatchState::Ready && feed.pending() == 3
+    );
+    c.sameText("fs: the first change", feed.next().describe(), "created new.txt");
+    c.sameText("fs: the second change", feed.next().describe(), "modified a.txt");
+    c.sameText("fs: the third change", feed.next().describe(), "deleted old.txt");
+    c.that("fs: then it is idle", feed.standing() == WatchState::Idle && feed.pending() == 0);
+    feed.markClosed();
+    c.that("fs: closing is final", !feed.isOpen() && feed.standing() == WatchState::Closed);
+    feed.markClosed();
+    c.that("fs: closing twice is harmless", !feed.isOpen());
+}
+
+/** The real disk: a folder made for the purpose, looked at through `Fs`, and removed. */
+fn fsRealChecks(c : Checks) : void {
+    let root : string = "${tempDir()}/gesso_fs_test";
+    let sub : string = root + "/sub";
+    let a : string = root + "/a.txt";
+    let b : string = root + "/b.bin";
+    let d : string = sub + "/c.txt";
+    let ln : string = root + "/ln";
+    let fresh : string = root + "/new.txt";
+    fsClean(root, sub, a, b, d, ln, fresh);
+    try {
+        Path::from(root).mkdir();
+        Path::from(sub).mkdir();
+        fsWriteFile(a, 100);
+        fsWriteFile(b, 1000);
+        fsWriteFile(d, 20);
+        fsListChecks(c, root, a, sub);
+        fsTreeChecks(c, root);
+        fsVolumeChecks(c, root);
+        fsLinkChecks(c, root, a, ln);
+        fsPlanChecks(c, a, ln);
+        fsWatchChecks(c, root, fresh);
+    } catch e : IOException {
+        c.that("fs: the real folder could not be set up or read (${e.message})", false);
+    }
+    fsClean(root, sub, a, b, d, ln, fresh);
+}
+
+/** Removes the whole scratch folder, deepest first. */
+fn fsClean(
+    root : string,
+    sub : string,
+    a : string,
+    b : string,
+    d : string,
+    ln : string,
+    fresh : string
+) : void {
+    fsRemove(fresh);
+    fsRemove(ln);
+    fsRemove(d);
+    fsRemove(a);
+    fsRemove(b);
+    fsRemove(sub);
+    fsRemove(root);
+}
+
+fn fsListChecks(c : Checks, root : string, a : string, sub : string) : void ! SysError {
+    let st : FileStat = Fs::stat(a);
+    c.sameInt("fs: stat gives the size", st.size, 100);
+    c.that("fs: stat gives a file", st.kind == EntryKind::File && !st.isLink() && !st.isDir());
+    c.that("fs: stat of a folder", Fs::stat(sub).isDir());
+    c.that("fs: stat keeps the path asked", st.path == a);
+    c.that("fs: a file is there", Fs::exists(a));
+    c.that("fs: a missing path is not there", !Fs::exists(root + "/nope"));
+    c.that("fs: stat of a missing path is Gone", fsIsGone(root + "/nope"));
+    let items : EntryList = Fs::list(root);
+    c.sameInt("fs: a folder lists its entries", items.size(), 3);
+    c.sameInt("fs: and counts its folders", items.folders(), 1);
+    c.sameInt("fs: and the bytes of its files", items.bytes(), 1100);
+    c.that("fs: a listed entry has its kind", items.at(items.find("sub")).stat.isDir());
+    c.sameInt("fs: a listed entry has its size", items.at(items.find("b.bin")).stat.size, 1000);
+    c.that("fs: a listed name is found", items.find("a.txt") >= 0 && items.find("nope") == -1);
+    Fs::setReadOnly(a, true);
+    c.that("fs: read-only is seen by stat", Fs::stat(a).readOnly);
+    Fs::setReadOnly(a, false);
+    c.that("fs: and can be taken off", !Fs::stat(a).readOnly);
+}
+
+fn fsTreeChecks(c : Checks, root : string) : void ! SysError {
+    let ts : TreeSize = Fs::treeSize(root);
+    c.sameInt("fs: tree size counts the bytes", ts.bytes, 1120);
+    c.sameInt("fs: tree size counts the files", ts.files, 3);
+    c.sameInt("fs: tree size counts the folders", ts.folders, 1);
+    c.sameInt("fs: nothing was skipped", ts.skipped, 0);
+    c.sameText("fs: a tree in a line", ts.describe(), "3 files, 1 folders, 1.1 KiB");
+    let mut raised : bool = false;
+    try {
+        Fs::treeSize(root + "/nope");
+    } catch e : SysError {
+        raised = true;
+    }
+    c.that("fs: tree size of a path that is not there raises", raised);
+}
+
+fn fsVolumeChecks(c : Checks, root : string) : void ! SysError {
+    c.that("fs: there are volumes", Fs::volumes().size() > 0);
+    c.that("fs: every mount includes the volumes", Fs::allVolumes().size() >= Fs::volumes().size());
+    let v : VolumeInfo = Fs::volumeOf(root);
+    c.that("fs: a volume holds the folder", v.root.byteLength > 0);
+    let all : VolumeTable = Fs::allVolumes();
+    let at : i32 = all.holding(root);
+    c.that("fs: the table agrees about which volume", at >= 0 && all.at(at).root == v.root);
+    let sp : SpaceInfo = Fs::space(root);
+    c.that("fs: the volume has a size", sp.total > 0);
+    c.that("fs: its room is within its size", sp.unused <= sp.total && sp.available <= sp.unused);
+    c.that(
+        "fs: its fullness is a tenth of a percent",
+        sp.fullTenths() >= 0 && sp.fullTenths() <= 1000
+    );
+}
+
+/**
+ * Whether `Fs::readLink` of `path` is refused as `Invalid`. A function of its own: catching inside a function
+ * that holds owned objects corrupts the heap on return (an Axle 0.20 fault; see LIMITATIONS.md).
+ */
+fn fsIsNotALink(path : string) : bool {
+    try {
+        Fs::readLink(path);
+    } catch e : Invalid {
+        return true;
+    } catch e : SysError {
+        return false;
+    }
+    return false;
+}
+
+fn fsLinkChecks(c : Checks, root : string, a : string, ln : string) : void {
+    let mut made : bool = false;
+    try {
+        Fs::makeLink(a, ln);
+        made = true;
+    } catch e : SysError {
+        made = false;
+    }
+    if (!made) {
+        // Linking is refused without a privilege on Windows: not a failure, and nothing to look at. The
+        // target is absolute: a relative one that is not there crashes the Windows port (see the report).
+        return;
+    }
+    try {
+        let st : FileStat = Fs::stat(ln);
+        c.that("fs: a link is a link", st.isLink());
+        let back : string = Fs::readLink(ln);
+        c.sameText("fs: a link reads back what it points to", back, a);
+        let items : EntryList = Fs::list(root);
+        let at : i32 = items.find("ln");
+        c.that("fs: a link is listed", at >= 0);
+        if (at >= 0) {
+            c.that("fs: a link is listed as a link", items.at(at).stat.isLink());
+        }
+        let file : string = root + "/a.txt";
+        c.that("fs: reading a file as a link is Invalid", fsIsNotALink(file));
+    } catch e : SysError {
+        c.that("fs: the link could not be read (${e.message})", false);
+    }
+}
+
+fn fsPlanChecks(c : Checks, a : string, ln : string) : void {
+    let pl : Plan = Fs::planMakeLink(a, ln);
+    c.sameInt("fs: a link plan has one step", pl.count(), 1);
+    c.that("fs: the plan says what it does", fsHas(pl.whatAt(0), "symbolic link"));
+    c.that("fs: the plan can be undone", pl.reversible());
+    c.that("fs: protecting can be undone", Fs::planSetReadOnly(a, true).reversible());
+    c.that(
+        "fs: Windows has no permission bits",
+        Os::name() != "windows" || Fs::canSetMode().state == SupportState::Unsupported
+    );
+}
+
+fn fsWatchChecks(c : Checks, root : string, fresh : string) : void ! SysError {
+    let w : FsWatcher = Fs::watch(root);
+    c.that("fs: a watcher is open", w.isOpen());
+    c.that("fs: and idle with nothing changed", w.wait(0) == WatchState::Idle);
+    try {
+        fsWriteFile(fresh, 5);
+    } catch e : IOException {
+        c.that("fs: the watched file could not be made", false);
+    }
+    let state : WatchState = w.wait(3000);
+    c.that("fs: a new file makes it ready", state == WatchState::Ready);
+    let mut seen : bool = false;
+    while (w.pending() > 0) {
+        let ch : FsChange = w.next();
+        if (ch.name == "new.txt" && ch.kind == ChangeKind::Created) {
+            seen = true;
+        }
+    }
+    c.that("fs: the creation of the file is reported by name", seen);
+    w.close();
+    c.that("fs: closing is final", !w.isOpen() && w.wait(0) == WatchState::Closed);
+    w.close();
+    c.that("fs: closing twice is harmless", !w.isOpen());
+}
